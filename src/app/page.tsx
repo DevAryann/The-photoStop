@@ -1,12 +1,45 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 
 export default function Home() {
+  const router = useRouter();
   const [roomCode, setRoomCode] = useState("");
+  const [isCreating, setIsCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleCreateRoom = () => {
-    // Placeholder for future room creation logic
+  const handleCreateRoom = async () => {
+    // Prevent duplicate submissions
+    if (isCreating) return;
+
+    setIsCreating(true);
+    setError(null);
+
+    try {
+      const response = await fetch("/api/rooms", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || "Failed to create room");
+      }
+
+      const data = await response.json();
+
+      // Navigate to the created room
+      router.push(`/room/${data.roomCode}`);
+    } catch (err) {
+      console.error("Failed to create room:", err);
+      setError(
+        err instanceof Error ? err.message : "Failed to create room. Please try again."
+      );
+      setIsCreating(false);
+    }
   };
 
   const handleJoinRoom = (e: React.FormEvent) => {
@@ -40,12 +73,46 @@ export default function Home() {
 
         {/* Actions */}
         <div className="w-full flex flex-col gap-6">
+          {/* Error Message */}
+          {error && (
+            <div className="w-full p-4 rounded-lg bg-red-500/10 border border-red-500/20 text-red-500 text-sm text-center">
+              {error}
+            </div>
+          )}
+
           {/* Primary Action: Create Room */}
           <button
             onClick={handleCreateRoom}
-            className="group w-full h-12 px-6 rounded-lg bg-gradient-to-r from-[var(--primary)] to-[var(--secondary)] text-[var(--text-primary)] text-sm font-semibold uppercase tracking-wide transition-transform hover:scale-[1.02] active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
+            disabled={isCreating}
+            className="group w-full h-12 px-6 rounded-lg bg-gradient-to-r from-[var(--primary)] to-[var(--secondary)] text-[var(--text-primary)] text-sm font-semibold uppercase tracking-wide transition-transform hover:scale-[1.02] active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
           >
-            Create a Room
+            {isCreating ? (
+              <span className="flex items-center justify-center gap-2">
+                <svg
+                  className="animate-spin h-4 w-4"
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                >
+                  <circle
+                    className="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                  />
+                  <path
+                    className="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                  />
+                </svg>
+                Creating Room...
+              </span>
+            ) : (
+              "Create a Room"
+            )}
           </button>
 
           {/* Divider */}
