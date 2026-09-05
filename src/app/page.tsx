@@ -7,6 +7,7 @@ export default function Home() {
   const router = useRouter();
   const [roomCode, setRoomCode] = useState("");
   const [isCreating, setIsCreating] = useState(false);
+  const [isJoining, setIsJoining] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleCreateRoom = async () => {
@@ -42,9 +43,42 @@ export default function Home() {
     }
   };
 
-  const handleJoinRoom = (e: React.FormEvent) => {
+  const handleJoinRoom = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Placeholder for future room join logic
+
+    // Prevent duplicate submissions
+    if (isJoining || roomCode.length === 0) return;
+
+    setIsJoining(true);
+    setError(null);
+
+    try {
+      const response = await fetch("/api/rooms/join", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          roomCode: roomCode.trim().toUpperCase(),
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || "Unable to join room");
+      }
+
+      const data = await response.json();
+
+      // Navigate to the joined room
+      router.push(`/room/${data.roomCode}`);
+    } catch (err) {
+      console.error("Failed to join room:", err);
+      setError(
+        err instanceof Error ? err.message : "Unable to join room. Please try again."
+      );
+      setIsJoining(false);
+    }
   };
 
   const handleRoomCodeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -140,10 +174,36 @@ export default function Home() {
             />
             <button
               type="submit"
-              disabled={roomCode.length === 0}
+              disabled={roomCode.length === 0 || isJoining}
               className="w-full h-12 px-6 rounded-lg bg-transparent border border-[var(--border-active)] text-[var(--text-primary)] text-sm font-semibold uppercase tracking-wide transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary)]/10 active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-[var(--border-active)] disabled:hover:bg-transparent"
             >
-              Join Room
+              {isJoining ? (
+                <span className="flex items-center justify-center gap-2">
+                  <svg
+                    className="animate-spin h-4 w-4"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                  >
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                    />
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                    />
+                  </svg>
+                  Joining...
+                </span>
+              ) : (
+                "Join Room"
+              )}
             </button>
           </form>
         </div>
