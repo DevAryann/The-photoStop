@@ -1,10 +1,21 @@
 import Link from 'next/link'
+import { cookies } from 'next/headers'
+import { validateRoomAccess } from '@/lib/room-validation'
 
 /**
  * Room Page - /room/[code]
  *
- * V1 minimal placeholder for room session view.
- * Shows room code and confirms successful room creation.
+ * Displays the room session view with state validation.
+ *
+ * Security:
+ * - Validates room exists and has not expired
+ * - Validates user's session capability belongs to a participant in this room
+ * - Never exposes capability hash, room UUID, or participant IDs
+ * - Shows generic "Room not available" for all unauthorized cases
+ *
+ * Room States:
+ * - waiting: Room created, waiting for 2nd participant (participant_count = 1)
+ * - active: Both participants joined, session in progress (participant_count = 2)
  *
  * Future phases will add:
  * - Camera setup and photo capture
@@ -22,33 +33,119 @@ interface RoomPageProps {
 export default async function RoomPage({ params }: RoomPageProps) {
   const { code } = await params
 
+  // Read session capability from HttpOnly cookie
+  const cookieStore = await cookies()
+  const capability = cookieStore.get('session_capability')?.value
+
+  // Validate room access server-side
+  // Returns { authorized: true, roomState } or { authorized: false }
+  const accessResult = capability
+    ? await validateRoomAccess(code, capability)
+    : { authorized: false }
+
+  // Show generic "Room not available" for all unauthorized cases:
+  // - Missing/invalid session capability
+  // - Room doesn't exist
+  // - Room expired
+  // - Capability doesn't belong to this room
+  // - Room state is completed/expired
+  if (!accessResult.authorized) {
+    return (
+      <main className="flex-1 flex flex-col items-center justify-center px-6 py-12 sm:px-12 md:px-24">
+        <div className="w-full max-w-md flex flex-col items-center gap-8">
+          {/* Error State */}
+          <div className="flex flex-col items-center gap-4 text-center">
+            <div className="w-16 h-16 rounded-full bg-[var(--surface)] border-2 border-[var(--border)] flex items-center justify-center">
+              <svg
+                width="32"
+                height="32"
+                viewBox="0 0 32 32"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="M16 10V16M16 22H16.01"
+                  stroke="var(--text-secondary)"
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <h1 className="text-2xl font-bold">Room Not Available</h1>
+              <p className="text-[var(--text-secondary)]">
+                This room doesn&apos;t exist or is no longer accessible
+              </p>
+            </div>
+          </div>
+
+          {/* Back to Home */}
+          <Link
+            href="/"
+            className="px-6 py-3 rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] text-white font-medium hover:opacity-90 transition-opacity"
+          >
+            Create a New Room
+          </Link>
+        </div>
+      </main>
+    )
+  }
+
+  // Access granted - show room UI based on state
+  const { roomState } = accessResult
+  const isWaiting = roomState === 'waiting'
+
   return (
     <main className="flex-1 flex flex-col items-center justify-center px-6 py-12 sm:px-12 md:px-24">
       <div className="w-full max-w-md flex flex-col items-center gap-8">
         {/* Room Status */}
         <div className="flex flex-col items-center gap-4 text-center">
           <div className="w-16 h-16 rounded-full bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] flex items-center justify-center">
-            <svg
-              width="32"
-              height="32"
-              viewBox="0 0 32 32"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path
-                d="M9 16L14 21L23 11"
-                stroke="white"
-                strokeWidth="3"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
+            {isWaiting ? (
+              <svg
+                width="32"
+                height="32"
+                viewBox="0 0 32 32"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+                className="animate-spin"
+              >
+                <path
+                  d="M16 4V8M16 24V28M8 16H4M28 16H24M22.364 22.364L19.536 19.536M22.364 9.636L19.536 12.464M9.636 22.364L12.464 19.536M9.636 9.636L12.464 12.464"
+                  stroke="white"
+                  strokeWidth="2.5"
+                  strokeLinecap="round"
+                />
+              </svg>
+            ) : (
+              <svg
+                width="32"
+                height="32"
+                viewBox="0 0 32 32"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="M9 16L14 21L23 11"
+                  stroke="white"
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            )}
           </div>
 
           <div className="flex flex-col gap-2">
-            <h1 className="text-2xl font-bold">Room Created</h1>
+            <h1 className="text-2xl font-bold">
+              {isWaiting ? 'Waiting for Participant' : 'Room Active'}
+            </h1>
             <p className="text-[var(--text-secondary)]">
-              Your photobooth room is ready
+              {isWaiting
+                ? 'Share the room code to invite someone'
+                : 'Both participants are here'}
             </p>
           </div>
         </div>
@@ -62,17 +159,21 @@ export default async function RoomPage({ params }: RoomPageProps) {
             {code}
           </div>
           <p className="text-sm text-[var(--text-secondary)] text-center">
-            Share this code with a friend to start capturing photos together
+            {isWaiting
+              ? 'Share this code with a friend to start'
+              : 'Ready to capture photos together'}
           </p>
         </div>
 
-        {/* Placeholder Notice */}
+        {/* State Indicator */}
         <div className="w-full p-4 rounded-lg bg-[var(--surface)] border border-[var(--border-active)]">
           <p className="text-sm text-[var(--text-secondary)] text-center">
             <span className="font-semibold text-[var(--text-primary)]">
-              Coming soon:
+              {isWaiting ? 'Waiting...' : 'Coming soon:'}
             </span>{' '}
-            Camera setup, photo capture, and editing features
+            {isWaiting
+              ? 'The session will start when a second participant joins'
+              : 'Camera setup, photo capture, and editing features'}
           </p>
         </div>
 
