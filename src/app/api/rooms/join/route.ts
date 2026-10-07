@@ -103,6 +103,27 @@ export async function POST(request: Request) {
     }
 
     // Room joined successfully
+
+    // Broadcast state change to waiting participants via Realtime
+    // Uses broadcast channel (no database access, no RLS needed)
+    // Channel is public (anyone with room code can subscribe)
+    // Only broadcasts minimal safe data: room state transition
+    try {
+      const channel = supabase.channel(`room:${normalizedRoomCode}`)
+      await channel.send({
+        type: 'broadcast',
+        event: 'state_change',
+        payload: { state: 'active' },
+      })
+
+      // Clean up channel after sending
+      await supabase.removeChannel(channel)
+    } catch (broadcastError) {
+      // Non-critical: broadcast failure doesn't prevent join success
+      // First participant can refresh or will see update on next action
+      console.error('[Join Room] Broadcast failed:', broadcastError)
+    }
+
     // Set NEW capability as HttpOnly cookie (replaces any existing capability)
     // Never expose capability in response JSON
     const cookieStore = await cookies()
