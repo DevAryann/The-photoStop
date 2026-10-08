@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { useRoomRealtime } from '@/hooks/use-room-realtime'
+import { CameraView } from '@/components/camera/camera-view'
 
 interface RoomClientProps {
   code: string
@@ -14,6 +15,11 @@ interface RoomClientProps {
  * Subscribes to Realtime broadcast channel to detect when second participant joins.
  * Server publishes state change after successful join_room() execution.
  *
+ * V1 Camera Integration:
+ * - Shows camera UI only when room is active
+ * - Camera permission requested only after explicit user action
+ * - Maintains existing room authorization model
+ *
  * Security:
  * - Capability validation happens server-side (parent Server Component)
  * - This component only handles UI updates based on broadcast events
@@ -25,6 +31,7 @@ export function RoomClient({ code, initialState }: RoomClientProps) {
   // Subscribe to real-time state updates via broadcast channel
   const roomState = useRoomRealtime(code, initialState)
   const isWaiting = roomState === 'waiting'
+  const isActive = roomState === 'active'
 
   return (
     <>
@@ -93,17 +100,24 @@ export function RoomClient({ code, initialState }: RoomClientProps) {
         </p>
       </div>
 
-      {/* State Indicator */}
-      <div className="w-full p-4 rounded-lg bg-[var(--surface)] border border-[var(--border-active)]">
-        <p className="text-sm text-[var(--text-secondary)] text-center">
-          <span className="font-semibold text-[var(--text-primary)]">
-            {isWaiting ? 'Waiting...' : 'Coming soon:'}
-          </span>{' '}
-          {isWaiting
-            ? 'The session will start when a second participant joins'
-            : 'Camera setup, photo capture, and editing features'}
-        </p>
-      </div>
+      {/* Camera View - Only shown when room is active */}
+      {isActive && (
+        <div className="w-full">
+          <CameraView />
+        </div>
+      )}
+
+      {/* Waiting State Indicator */}
+      {isWaiting && (
+        <div className="w-full p-4 rounded-lg bg-[var(--surface)] border border-[var(--border-active)]">
+          <p className="text-sm text-[var(--text-secondary)] text-center">
+            <span className="font-semibold text-[var(--text-primary)]">
+              Waiting...
+            </span>{' '}
+            The session will start when a second participant joins
+          </p>
+        </div>
+      )}
 
       {/* Back to Home */}
       <Link
