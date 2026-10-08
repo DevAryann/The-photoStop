@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useCamera } from '@/hooks/use-camera'
 
 /**
@@ -32,6 +32,9 @@ export function CameraView() {
 
   // Canvas ref for capturing frames
   const canvasRef = useRef<HTMLCanvasElement>(null)
+
+  // Debug logging for render cycles
+  console.log('[CameraView] Render - status:', status, 'capturedPhoto:', !!capturedPhoto)
 
   /**
    * Capture current video frame to canvas and convert to Blob
@@ -104,9 +107,10 @@ export function CameraView() {
       setCapturedPhoto({ blob, objectUrl })
 
       console.log('[Camera] Capture successful, blob size:', blob.size)
+      console.log('[Camera] capturedPhoto will be set, status is:', status)
 
-      // Stop camera stream after capture
-      stopCamera()
+      // Don't stop camera here - keep stream active while showing preview
+      // Camera will be stopped when user clicks Keep or component unmounts
     } catch (err) {
       console.error('[Camera] Error capturing photo:', err)
       const errorMessage = err instanceof Error ? err.message : 'Failed to capture photo. Please try again.'
@@ -114,7 +118,7 @@ export function CameraView() {
     } finally {
       setIsCapturing(false)
     }
-  }, [videoRef, streamRef, stopCamera])
+  }, [videoRef, streamRef, status])
 
   /**
    * Retake: discard captured photo and restart camera
@@ -138,24 +142,58 @@ export function CameraView() {
     // Future: Store in photo array, continue to next capture
     alert('Photo saved! (V1: No multi-photo capture yet)')
 
-    // Clean up
+    // Clean up captured photo
     if (capturedPhoto) {
       URL.revokeObjectURL(capturedPhoto.objectUrl)
       setCapturedPhoto(null)
     }
-  }, [capturedPhoto])
+
+    // Stop camera stream after keeping photo
+    stopCamera()
+  }, [capturedPhoto, stopCamera])
 
   /**
    * Cleanup object URLs on unmount
    */
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useCallback(() => {
+  useEffect(() => {
     return () => {
       if (capturedPhoto) {
         URL.revokeObjectURL(capturedPhoto.objectUrl)
       }
     }
   }, [capturedPhoto])
+
+  // IMPORTANT: Check capturedPhoto FIRST, before any status checks
+  // This ensures the captured photo preview is shown even if status changes
+  if (capturedPhoto) {
+    console.log('[CameraView] Rendering captured photo preview')
+    return (
+      <div className="w-full flex flex-col items-center gap-6">
+        <div className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-[var(--canvas)] border border-[var(--border)]">
+          <img
+            src={capturedPhoto.objectUrl}
+            alt="Captured photo"
+            className="w-full h-full object-cover"
+          />
+        </div>
+
+        <div className="w-full flex gap-3">
+          <button
+            onClick={handleRetake}
+            className="flex-1 px-6 py-3 rounded-lg border border-[var(--border-active)] text-[var(--text-primary)] hover:bg-[var(--surface)] transition-colors font-medium"
+          >
+            Retake
+          </button>
+          <button
+            onClick={handleKeep}
+            className="flex-1 px-6 py-3 rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] text-white font-semibold hover:opacity-90 transition-opacity"
+          >
+            Keep Photo
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   // Camera not started yet
   if (status === 'idle') {
@@ -264,36 +302,6 @@ export function CameraView() {
         >
           Try Again
         </button>
-      </div>
-    )
-  }
-
-  // Show captured photo preview
-  if (capturedPhoto) {
-    return (
-      <div className="w-full flex flex-col items-center gap-6">
-        <div className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-[var(--canvas)] border border-[var(--border)]">
-          <img
-            src={capturedPhoto.objectUrl}
-            alt="Captured photo"
-            className="w-full h-full object-cover"
-          />
-        </div>
-
-        <div className="w-full flex gap-3">
-          <button
-            onClick={handleRetake}
-            className="flex-1 px-6 py-3 rounded-lg border border-[var(--border-active)] text-[var(--text-primary)] hover:bg-[var(--surface)] transition-colors font-medium"
-          >
-            Retake
-          </button>
-          <button
-            onClick={handleKeep}
-            className="flex-1 px-6 py-3 rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] text-white font-semibold hover:opacity-90 transition-opacity"
-          >
-            Keep Photo
-          </button>
-        </div>
       </div>
     )
   }
