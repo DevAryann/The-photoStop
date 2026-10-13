@@ -6,18 +6,20 @@ import { useCamera } from '@/hooks/use-camera'
 /**
  * Camera View Component
  *
- * V1 Scope:
+ * V2 Scope:
  * - Request camera permission on user action
  * - Show live camera preview
- * - Capture single photo (canvas-based)
- * - Show captured photo preview
- * - Retake or Keep actions
+ * - Capture 4 photos in sequence
+ * - 3-second countdown before each capture
+ * - 2-second pause between captures
+ * - Show all 4 photos after completion
+ * - Retake All or Continue to Editor
  *
- * NOT in V1:
- * - Multiple photo capture (4 photos)
+ * NOT in V2:
  * - Device switching (front/back camera)
  * - Filters, stickers, effects
  * - Upload or storage
+ * - Photo strip layout/editing
  */
 
 interface CapturedPhoto {
@@ -25,36 +27,38 @@ interface CapturedPhoto {
   objectUrl: string
 }
 
+type CapturePhase = 'idle' | 'countdown' | 'capturing' | 'pause' | 'complete'
+
 export function CameraView() {
   const { status, error, videoRef, streamRef, startCamera, stopCamera } = useCamera()
-  const [capturedPhoto, setCapturedPhoto] = useState<CapturedPhoto | null>(null)
-  const [isCapturing, setIsCapturing] = useState(false)
+  const [photos, setPhotos] = useState<CapturedPhoto[]>([])
+  const [capturePhase, setCapturePhase] = useState<CapturePhase>('idle')
+  const [countdown, setCountdown] = useState<number>(3)
 
   // Canvas ref for capturing frames
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
+  // Timer ref for cleanup
+  const timerRef = useRef<NodeJS.Timeout | null>(null)
+
   // Debug logging for render cycles
-  console.log('[CameraView] Render - status:', status, 'capturedPhoto:', !!capturedPhoto)
+  console.log('[CameraView] Render - status:', status, 'photos:', photos.length, 'phase:', capturePhase)
 
   /**
-   * Capture current video frame to canvas and convert to Blob
+   * Capture a single photo and add to photos array
    */
-  const capturePhoto = useCallback(async () => {
+  const captureSinglePhoto = useCallback(async () => {
     if (!videoRef.current || !canvasRef.current || !streamRef.current) {
       console.error('[Camera] Capture failed: missing video, canvas, or stream ref')
       return
     }
-
-    setIsCapturing(true)
 
     try {
       const video = videoRef.current
       const canvas = canvasRef.current
       const stream = streamRef.current
 
-      console.log('[Camera] Starting capture')
-      console.log('[Camera] Video readyState:', video.readyState)
-      console.log('[Camera] Video dimensions:', video.videoWidth, 'x', video.videoHeight)
+      console.log('[Camera] Capturing photo')
 
       // Verify stream has active video tracks
       const videoTracks = stream.getVideoTracks()
@@ -62,8 +66,7 @@ export function CameraView() {
         throw new Error('Camera stream is not active. Please restart the camera.')
       }
 
-      // Verify video is ready before attempting capture
-      // readyState should be at least HAVE_CURRENT_DATA (2)
+      // Verify video is ready
       if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
         throw new Error('Video is not ready yet. Please wait a moment and try again.')
       }
@@ -103,92 +106,156 @@ export function CameraView() {
       // Create object URL for preview
       const objectUrl = URL.createObjectURL(blob)
 
-      // Store captured photo
-      setCapturedPhoto({ blob, objectUrl })
+      // Add to photos array
+      setPhotos((prev) => [...prev, { blob, objectUrl }])
 
-      console.log('[Camera] Capture successful, blob size:', blob.size)
-      console.log('[Camera] capturedPhoto will be set, status is:', status)
-
-      // Don't stop camera here - keep stream active while showing preview
-      // Camera will be stopped when user clicks Keep or component unmounts
+      console.log('[Camera] Photo captured successfully, blob size:', blob.size)
     } catch (err) {
       console.error('[Camera] Error capturing photo:', err)
       const errorMessage = err instanceof Error ? err.message : 'Failed to capture photo. Please try again.'
       alert(errorMessage)
-    } finally {
-      setIsCapturing(false)
+      // Reset to idle on error
+      setCapturePhase('idle')
     }
-  }, [videoRef, streamRef, status])
+  }, [videoRef, streamRef])
 
   /**
-   * Retake: discard captured photo and restart camera
+   * Start 4-photo capture sequence
    */
-  const handleRetake = useCallback(() => {
-    if (capturedPhoto) {
-      // Revoke object URL to free memory
-      URL.revokeObjectURL(capturedPhoto.objectUrl)
-      setCapturedPhoto(null)
+  const startCaptureSequence = useCallback(async () => {
+    if (capturePhase !== 'idle') return
+
+    console.log('[Camera] Starting 4-photo capture sequence')
+    setPhotos([]) // Clear any existing photos
+
+    // Capture 4 photos with countdown and pause between each
+    for (let i = 0; i < 4; i++) {
+      // Countdown phase (3 seconds)
+      setCapturePhase('countdown')
+      for (let count = 3; count > 0; count--) {
+        setCountdown(count)
+        await new Promise((resolve) => {
+          timerRef.current = setTimeout(resolve, 1000)
+        })
+      }
+
+      // Capture phase
+      setCapturePhase('capturing')
+      await captureSinglePhoto()
+
+      // Pause phase (2 seconds) - except after last photo
+      if (i < 3) {
+        setCapturePhase('pause')
+        await new Promise((resolve) => {
+          timerRef.current = setTimeout(resolve, 2000)
+        })
+      }
     }
+
+    // All photos captured
+    setCapturePhase('complete')
+    console.log('[Camera] All 4 photos captured')
+  }, [capturePhase, captureSinglePhoto])
+
+  /**
+   * Retake all photos: discard all and restart camera
+   */
+  const handleRetakeAll = useCallback(() => {
+    // Revoke all object URLs to free memory
+    photos.forEach((photo) => {
+      URL.revokeObjectURL(photo.objectUrl)
+    })
+    setPhotos([])
+    setCapturePhase('idle')
 
     // Restart camera
     startCamera()
-  }, [capturedPhoto, startCamera])
+  }, [photos, startCamera])
 
   /**
-   * Keep: accept captured photo (for now, just show success)
+   * Continue to editor (placeholder)
    */
-  const handleKeep = useCallback(() => {
-    // V1: Just show confirmation
-    // Future: Store in photo array, continue to next capture
-    alert('Photo saved! (V1: No multi-photo capture yet)')
+  const handleContinueToEditor = useCallback(() => {
+    // V2: Placeholder for editor transition
+    alert('Continue to Editor - Coming soon!')
 
-    // Clean up captured photo
-    if (capturedPhoto) {
-      URL.revokeObjectURL(capturedPhoto.objectUrl)
-      setCapturedPhoto(null)
-    }
+    // Clean up photos
+    photos.forEach((photo) => {
+      URL.revokeObjectURL(photo.objectUrl)
+    })
+    setPhotos([])
+    setCapturePhase('idle')
 
-    // Stop camera stream after keeping photo
+    // Stop camera stream
     stopCamera()
-  }, [capturedPhoto, stopCamera])
+  }, [photos, stopCamera])
 
   /**
-   * Cleanup object URLs on unmount
+   * Cleanup timers and object URLs on unmount
    */
   useEffect(() => {
     return () => {
-      if (capturedPhoto) {
-        URL.revokeObjectURL(capturedPhoto.objectUrl)
+      // Clear any pending timers
+      if (timerRef.current) {
+        clearTimeout(timerRef.current)
       }
-    }
-  }, [capturedPhoto])
 
-  // IMPORTANT: Check capturedPhoto FIRST, before any status checks
-  // This ensures the captured photo preview is shown even if status changes
-  if (capturedPhoto) {
-    console.log('[CameraView] Rendering captured photo preview')
+      // Revoke all object URLs on unmount
+      photos.forEach((photo) => {
+        URL.revokeObjectURL(photo.objectUrl)
+      })
+    }
+  }, [])
+
+  // IMPORTANT: Check if all 4 photos are captured (complete phase)
+  if (capturePhase === 'complete' && photos.length === 4) {
+    console.log('[CameraView] Rendering 4-photo grid')
     return (
       <div className="w-full flex flex-col items-center gap-6">
-        <div className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-[var(--canvas)] border border-[var(--border)]">
-          <img
-            src={capturedPhoto.objectUrl}
-            alt="Captured photo"
-            className="w-full h-full object-cover"
-          />
+        {/* 4-Photo Grid */}
+        <div className="w-full grid grid-cols-2 gap-3">
+          {photos.map((photo, index) => (
+            <div
+              key={photo.objectUrl}
+              className="aspect-[4/3] rounded-lg overflow-hidden bg-[var(--canvas)] border border-[var(--border)]"
+            >
+              <img
+                src={photo.objectUrl}
+                alt={`Captured photo ${index + 1}`}
+                className="w-full h-full object-cover"
+              />
+            </div>
+          ))}
         </div>
 
+        {/* Photo Counter */}
+        <div className="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5" />
+            <path
+              d="M5 8L7 10L11 6"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+          <span>All 4 photos captured</span>
+        </div>
+
+        {/* Action Buttons */}
         <div className="w-full flex gap-3">
           <button
-            onClick={handleRetake}
+            onClick={handleRetakeAll}
             className="flex-1 px-6 py-3 rounded-lg border border-[var(--border-active)] text-[var(--text-primary)] hover:bg-[var(--surface)] transition-colors font-medium"
           >
-            Retake
+            Retake All
           </button>
           <button
-            onClick={handleKeep}
+            onClick={handleContinueToEditor}
             className="flex-1 px-6 py-3 rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] text-white font-semibold hover:opacity-90 transition-opacity"
           >
-            Keep Photo
+            Continue to Editor
           </button>
         </div>
       </div>
@@ -306,7 +373,7 @@ export function CameraView() {
     )
   }
 
-  // Active camera: show live preview with capture button
+  // Active camera: show live preview with capture sequence UI
   return (
     <div className="w-full flex flex-col items-center gap-6">
       {/* Video Preview */}
@@ -319,35 +386,89 @@ export function CameraView() {
           className="w-full h-full object-cover"
         />
 
-        {/* Capture Button Overlay */}
-        <div className="absolute inset-0 flex items-end justify-center pb-8 pointer-events-none">
-          <button
-            onClick={capturePhoto}
-            disabled={isCapturing}
-            className="pointer-events-auto w-20 h-20 rounded-full bg-white border-4 border-[var(--primary)] hover:scale-105 active:scale-95 transition-transform disabled:opacity-50 shadow-lg"
-            aria-label="Capture photo"
-          >
-            {isCapturing ? (
-              <div className="w-full h-full flex items-center justify-center">
-                <div className="w-8 h-8 border-3 border-[var(--primary)] border-t-transparent rounded-full animate-spin" />
-              </div>
-            ) : (
-              <div className="w-full h-full rounded-full bg-white" />
-            )}
-          </button>
-        </div>
+        {/* Countdown Overlay */}
+        {capturePhase === 'countdown' && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+            <div className="text-[120px] font-bold text-white drop-shadow-lg animate-pulse">
+              {countdown}
+            </div>
+          </div>
+        )}
+
+        {/* Capturing Flash Effect */}
+        {capturePhase === 'capturing' && (
+          <div className="absolute inset-0 bg-white animate-[flash_0.3s_ease-out]" />
+        )}
+
+        {/* Pause Indicator */}
+        {capturePhase === 'pause' && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+            <div className="flex flex-col items-center gap-3">
+              <div className="w-12 h-12 border-4 border-white border-t-transparent rounded-full animate-spin" />
+              <p className="text-white text-lg font-medium">Get ready...</p>
+            </div>
+          </div>
+        )}
+
+        {/* Capture Button - Only shown when idle */}
+        {capturePhase === 'idle' && (
+          <div className="absolute inset-0 flex items-end justify-center pb-8 pointer-events-none">
+            <button
+              onClick={startCaptureSequence}
+              className="pointer-events-auto px-8 py-4 rounded-full bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] hover:scale-105 active:scale-95 transition-transform shadow-lg font-semibold text-white"
+              aria-label="Start 4-photo capture"
+            >
+              Capture 4 Photos
+            </button>
+          </div>
+        )}
+
+        {/* Photo Counter During Capture */}
+        {capturePhase !== 'idle' && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full bg-black/60 backdrop-blur-sm">
+            <p className="text-white text-sm font-medium">
+              Photo {photos.length} of 4
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Hidden canvas for capturing frames */}
       <canvas ref={canvasRef} className="hidden" />
 
-      {/* Stop Camera Button */}
-      <button
-        onClick={stopCamera}
-        className="text-sm text-[var(--text-secondary)] hover:text-[var(--primary)] transition-colors underline underline-offset-4"
-      >
-        Stop Camera
-      </button>
+      {/* Stop Camera Button - Only when idle */}
+      {capturePhase === 'idle' && (
+        <button
+          onClick={stopCamera}
+          className="text-sm text-[var(--text-secondary)] hover:text-[var(--primary)] transition-colors underline underline-offset-4"
+        >
+          Stop Camera
+        </button>
+      )}
+
+      {/* Capture in Progress Message */}
+      {capturePhase !== 'idle' && (
+        <div className="text-center">
+          <p className="text-sm text-[var(--text-secondary)]">
+            Capture in progress... Please stay still
+          </p>
+        </div>
+      )}
+
+      {/* CSS for flash animation */}
+      <style jsx>{`
+        @keyframes flash {
+          0% {
+            opacity: 0;
+          }
+          50% {
+            opacity: 0.8;
+          }
+          100% {
+            opacity: 0;
+          }
+        }
+      `}</style>
     </div>
   )
 }
