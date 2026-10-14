@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { useCamera } from '@/hooks/use-camera'
+import { usePhotoStrip } from '@/context/photo-strip-context'
 
 /**
  * Camera View Component
@@ -29,8 +30,13 @@ interface CapturedPhoto {
 
 type CapturePhase = 'idle' | 'countdown' | 'capturing' | 'pause' | 'complete'
 
-export function CameraView() {
+interface CameraViewProps {
+  onEditorOpen?: () => void
+}
+
+export function CameraView({ onEditorOpen }: CameraViewProps = {}) {
   const { status, error, videoRef, streamRef, startCamera, stopCamera } = useCamera()
+  const { setPhotos: setContextPhotos } = usePhotoStrip()
   const [photos, setPhotos] = useState<CapturedPhoto[]>([])
   const [capturePhase, setCapturePhase] = useState<CapturePhase>('idle')
   const [countdown, setCountdown] = useState<number>(3)
@@ -173,22 +179,31 @@ export function CameraView() {
   }, [photos, startCamera])
 
   /**
-   * Continue to editor (placeholder)
+   * Continue to editor: transfer photos to context and navigate
    */
   const handleContinueToEditor = useCallback(() => {
-    // V2: Placeholder for editor transition
-    alert('Continue to Editor - Coming soon!')
+    if (photos.length !== 4) {
+      console.error('[Camera] Not all photos ready')
+      return
+    }
 
-    // Clean up photos
-    photos.forEach((photo) => {
-      URL.revokeObjectURL(photo.objectUrl)
-    })
+    console.log('[Camera] Transferring 4 photos to editor context')
+
+    // Transfer photos to context for editor
+    setContextPhotos(photos)
+
+    // Reset local state
     setPhotos([])
     setCapturePhase('idle')
 
     // Stop camera stream
     stopCamera()
-  }, [photos, stopCamera])
+
+    // Notify parent to show editor
+    if (onEditorOpen) {
+      onEditorOpen()
+    }
+  }, [photos, stopCamera, setContextPhotos, onEditorOpen])
 
   /**
    * Cleanup timers and object URLs on unmount
