@@ -13,9 +13,11 @@ import { useState } from 'react'
  * - Real-time preview
  * - Back button to return to capture
  * - Export to PNG with selected styling
+ * - Share via Web Share API (with graceful fallback)
  *
  * Photos stay in React context during the session.
  * Object URLs remain valid while component is mounted.
+ * All processing is client-side; no photos are uploaded or shared externally.
  */
 
 interface BackgroundOption {
@@ -56,11 +58,15 @@ const STRIP_STYLES: StripStyleOption[] = [
   },
 ]
 
-async function exportPhotoStrip(
+/**
+ * Renders the photo strip onto a canvas and resolves with the resulting PNG Blob.
+ * Shared by both download and share paths so both actions produce identical output.
+ */
+async function buildPhotoStripBlob(
   photos: Array<{ objectUrl: string }>,
   backgroundColor: string,
   stripStyle: 'plain' | 'polaroid' | 'retro'
-): Promise<void> {
+): Promise<Blob> {
   // High resolution export: 1080px width, 4:3 aspect ratio × 4 photos
   const PHOTO_WIDTH = 1080
   const PHOTO_HEIGHT = 810 // 4:3 aspect ratio
@@ -146,38 +152,83 @@ async function exportPhotoStrip(
     currentY += PHOTO_HEIGHT + style.photoGap
   }
 
-  // Convert to blob and download
-  canvas.toBlob((blob) => {
-    if (!blob) throw new Error('Canvas export failed')
+  // Convert canvas to Blob
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) reject(new Error('Canvas export failed'))
+      else resolve(blob)
+    }, 'image/png')
+  })
+}
 
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'photobooth-strip.png'
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-  }, 'image/png')
+/** Returns true when the browser supports sharing PNG files via the Web Share API. */
+function canShareFiles(): boolean {
+  if (typeof navigator === 'undefined' || !navigator.share || !navigator.canShare) {
+    return false
+  }
+  try {
+    const probe = new File([''], 'probe.png', { type: 'image/png' })
+    return navigator.canShare({ files: [probe] })
+  } catch {
+    return false
+  }
 }
 
 export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
   const { photos, backgroundColor, setBackgroundColor, stripStyle, setStripStyle } =
     usePhotoStrip()
   const [isExporting, setIsExporting] = useState(false)
+  const [isSharing, setIsSharing] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
+  const [shareMessage, setShareMessage] = useState<string | null>(null)
+
+  const isBusy = isExporting || isSharing
 
   const handleExport = async () => {
     setIsExporting(true)
     setExportError(null)
+    setShareMessage(null)
     try {
-      await exportPhotoStrip(photos, backgroundColor, stripStyle)
+      const blob = await buildPhotoStripBlob(photos, backgroundColor, stripStyle)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'photobooth-strip.png'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
     } catch (err) {
       setExportError(err instanceof Error ? err.message : 'Export failed')
     } finally {
       setIsExporting(false)
     }
   }
+
+  const handleShare = async () => {
+    setIsSharing(true)
+    setExportError(null)
+    setShareMessage(null)
+    try {
+      const blob = await buildPhotoStripBlob(photos, backgroundColor, stripStyle)
+      const file = new File([blob], 'photobooth-strip.png', { type: 'image/png' })
+      await navigator.share({
+        files: [file],
+        title: 'My Photo Strip',
+      })
+    } catch (err) {
+      // AbortError means the user dismissed the share sheet — not an error
+      if (err instanceof Error && err.name === 'AbortError') {
+        // do nothing
+      } else {
+        setExportError(err instanceof Error ? err.message : 'Share failed')
+      }
+    } finally {
+      setIsSharing(false)
+    }
+  }
+
+  const fileShareSupported = canShareFiles()
 
   if (photos.length !== 4) {
     return (
@@ -311,16 +362,45 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
           >
             ← Back
           </button>
+
+          {/* Download PNG */}
           <button
             onClick={handleExport}
-            disabled={isExporting}
-            className="flex-1 px-6 py-3 rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] text-white font-semibold hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={isBusy}
+            className="flex-1 px-6 py-3 rounded-lg bg-[var(--surface)] border border-[var(--border-active)] text-[var(--text-primary)] font-semibold hover:bg-[var(--canvas)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            aria-label="Download photo strip as PNG"
           >
-            {isExporting ? 'Exporting...' : 'Download PNG'}
+            {isExporting ? 'Exporting…' : 'Download'}
           </button>
+
+          {/* Share — only shown when Web Share API with file support is available */}
+          {fileShareSupported && (
+            <button
+              onClick={handleShare}
+              disabled={isBusy}
+              className="flex-1 px-6 py-3 rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] text-white font-semibold hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+              aria-label="Share photo strip"
+            >
+              {isSharing ? 'Sharing…' : 'Share'}
+            </button>
+          )}
         </div>
 
-        {/* Error Message */}
+        {/* Fallback message when file sharing is unsupported */}
+        {!fileShareSupported && (
+          <p className="text-xs text-[var(--text-secondary)] text-center leading-relaxed">
+            Download the PNG then share it from your device — your browser doesn&apos;t support direct file sharing yet.
+          </p>
+        )}
+
+        {/* Share success message */}
+        {shareMessage && (
+          <div className="p-3 rounded-lg bg-green-50 border border-green-200 text-green-700 text-sm text-center">
+            {shareMessage}
+          </div>
+        )}
+
+        {/* Error message (export or share) */}
         {exportError && (
           <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">
             {exportError}
@@ -330,7 +410,7 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
 
       {/* Info Text */}
       <p className="text-xs text-[var(--text-tertiary)] text-center">
-        High-resolution PNG optimized for sharing and printing.
+        High-resolution PNG — ready to share or print.
       </p>
     </div>
   )

@@ -1,10 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 
 export default function Home() {
-  const router = useRouter();
   const [roomCode, setRoomCode] = useState("");
   const [isCreating, setIsCreating] = useState(false);
   const [isJoining, setIsJoining] = useState(false);
@@ -32,8 +30,10 @@ export default function Home() {
 
       const data = await response.json();
 
-      // Navigate to the created room
-      router.push(`/room/${data.roomCode}`);
+      // Hard navigation ensures the browser sends the freshly-set HttpOnly
+      // cookie on the next request (SPA router.push can race cookie commit
+      // on mobile browsers, especially iOS Safari on LAN IP origins).
+      window.location.assign(`/room/${data.roomCode}`);
     } catch (err) {
       console.error("Failed to create room:", err);
       setError(
@@ -70,8 +70,10 @@ export default function Home() {
 
       const data = await response.json();
 
-      // Navigate to the joined room
-      router.push(`/room/${data.roomCode}`);
+      // Hard navigation ensures the browser sends the freshly-set HttpOnly
+      // cookie on the next request (SPA router.push can race cookie commit
+      // on mobile browsers, especially iOS Safari on LAN IP origins).
+      window.location.assign(`/room/${data.roomCode}`);
     } catch (err) {
       console.error("Failed to join room:", err);
       setError(
