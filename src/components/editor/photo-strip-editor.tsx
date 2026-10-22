@@ -1,6 +1,7 @@
 'use client'
 
 import { usePhotoStrip } from '@/context/photo-strip-context'
+import { useState } from 'react'
 
 /**
  * Photo Strip Editor V1
@@ -11,6 +12,7 @@ import { usePhotoStrip } from '@/context/photo-strip-context'
  * - Strip style presets
  * - Real-time preview
  * - Back button to return to capture
+ * - Export to PNG with selected styling
  *
  * Photos stay in React context during the session.
  * Object URLs remain valid while component is mounted.
@@ -54,9 +56,128 @@ const STRIP_STYLES: StripStyleOption[] = [
   },
 ]
 
+async function exportPhotoStrip(
+  photos: Array<{ objectUrl: string }>,
+  backgroundColor: string,
+  stripStyle: 'plain' | 'polaroid' | 'retro'
+): Promise<void> {
+  // High resolution export: 1080px width, 4:3 aspect ratio × 4 photos
+  const PHOTO_WIDTH = 1080
+  const PHOTO_HEIGHT = 810 // 4:3 aspect ratio
+
+  // Style configuration at export resolution
+  const styles = {
+    plain: {
+      photoGap: 24,
+      containerPadding: 0,
+      containerBorder: 0,
+      photoBorder: 0,
+    },
+    polaroid: {
+      photoGap: 32,
+      containerPadding: 0,
+      containerBorder: 0,
+      photoBorder: 0,
+    },
+    retro: {
+      photoGap: 24,
+      containerPadding: 32,
+      containerBorder: 16,
+      photoBorder: 8,
+    },
+  }
+
+  const style = styles[stripStyle]
+  const totalWidth = PHOTO_WIDTH + style.containerPadding * 2
+  const totalHeight =
+    PHOTO_HEIGHT * 4 +
+    style.photoGap * 3 +
+    (stripStyle === 'polaroid' ? 96 : 0) +
+    style.containerPadding * 2 +
+    style.containerBorder * 2
+
+  const canvas = document.createElement('canvas')
+  canvas.width = totalWidth
+  canvas.height = totalHeight
+
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Canvas 2D context unavailable')
+
+  // Fill container background
+  ctx.fillStyle = backgroundColor
+  ctx.fillRect(0, 0, totalWidth, totalHeight)
+
+  // Draw border if retro style
+  if (style.containerBorder > 0) {
+    ctx.fillStyle = '#1a1a1a'
+    ctx.fillRect(style.containerBorder, style.containerBorder, totalWidth - style.containerBorder * 2, totalHeight - style.containerBorder * 2)
+    ctx.fillStyle = backgroundColor
+    ctx.fillRect(
+      style.containerBorder + style.containerBorder / 2,
+      style.containerBorder + style.containerBorder / 2,
+      totalWidth - style.containerBorder * 3,
+      totalHeight - style.containerBorder * 3
+    )
+  }
+
+  // Load and draw each photo
+  let currentY = style.containerPadding + style.containerBorder / 2
+
+  for (const photo of photos) {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const element = new Image()
+      element.crossOrigin = 'anonymous'
+      element.onload = () => resolve(element)
+      element.onerror = () => reject(new Error(`Failed to load photo`))
+      element.src = photo.objectUrl
+    })
+
+    const currentX = style.containerPadding + style.containerBorder / 2
+
+    // Draw photo border if retro
+    if (style.photoBorder > 0) {
+      ctx.fillStyle = '#1a1a1a'
+      ctx.fillRect(currentX, currentY, PHOTO_WIDTH, PHOTO_HEIGHT)
+    }
+
+    // Draw photo with aspect ratio preservation
+    ctx.drawImage(img, currentX + style.photoBorder, currentY + style.photoBorder, PHOTO_WIDTH - style.photoBorder * 2, PHOTO_HEIGHT - style.photoBorder * 2)
+
+    currentY += PHOTO_HEIGHT + style.photoGap
+  }
+
+  // Convert to blob and download
+  canvas.toBlob((blob) => {
+    if (!blob) throw new Error('Canvas export failed')
+
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'photobooth-strip.png'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }, 'image/png')
+}
+
 export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
   const { photos, backgroundColor, setBackgroundColor, stripStyle, setStripStyle } =
     usePhotoStrip()
+  const [isExporting, setIsExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+
+  const handleExport = async () => {
+    setIsExporting(true)
+    setExportError(null)
+    try {
+      await exportPhotoStrip(photos, backgroundColor, stripStyle)
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : 'Export failed')
+    } finally {
+      setIsExporting(false)
+    }
+  }
 
   if (photos.length !== 4) {
     return (
@@ -182,24 +303,34 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
       </div>
 
       {/* Action Buttons */}
-      <div className="w-full flex gap-3 pt-4">
-        <button
-          onClick={onBack}
-          className="flex-1 px-6 py-3 rounded-lg border border-[var(--border-active)] text-[var(--text-primary)] hover:bg-[var(--surface)] transition-colors font-medium"
-        >
-          ← Back
-        </button>
-        <button
-          className="flex-1 px-6 py-3 rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] text-white font-semibold hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
-          disabled
-        >
-          Download
-        </button>
+      <div className="w-full flex flex-col gap-3">
+        <div className="flex gap-3 pt-4">
+          <button
+            onClick={onBack}
+            className="flex-1 px-6 py-3 rounded-lg border border-[var(--border-active)] text-[var(--text-primary)] hover:bg-[var(--surface)] transition-colors font-medium"
+          >
+            ← Back
+          </button>
+          <button
+            onClick={handleExport}
+            disabled={isExporting}
+            className="flex-1 px-6 py-3 rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] text-white font-semibold hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isExporting ? 'Exporting...' : 'Download PNG'}
+          </button>
+        </div>
+
+        {/* Error Message */}
+        {exportError && (
+          <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">
+            {exportError}
+          </div>
+        )}
       </div>
 
       {/* Info Text */}
       <p className="text-xs text-[var(--text-tertiary)] text-center">
-        Download feature coming soon. Your strip is ready to customize.
+        High-resolution PNG optimized for sharing and printing.
       </p>
     </div>
   )
