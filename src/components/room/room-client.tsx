@@ -36,8 +36,8 @@ export function RoomClient({ code, initialState }: RoomClientProps) {
   const isWaiting = roomState === 'waiting'
   const isActive = roomState === 'active'
 
-  // Local state for camera vs editor view
-  const [viewMode, setViewMode] = useState<'camera' | 'editor'>('camera')
+  // Local state for view mode: 'camera' (idle/capturing), 'review' (4 photos), 'editor'
+  const [viewMode, setViewMode] = useState<'camera' | 'review' | 'editor'>('camera')
 
   return (
     <PhotoStripProvider>
@@ -114,7 +114,17 @@ export function RoomClient({ code, initialState }: RoomClientProps) {
         {/* Camera View - Only shown when room is active and in camera mode */}
         {isActive && viewMode === 'camera' && (
           <div className="w-full">
-            <CameraView onEditorOpen={() => setViewMode('editor')} />
+            <CameraView onReviewOpen={() => setViewMode('review')} />
+          </div>
+        )}
+
+        {/* Review Screen - 4 photos captured, ready to edit or retake */}
+        {viewMode === 'review' && (
+          <div className="w-full">
+            <CameraView
+              onEditorOpen={() => setViewMode('editor')}
+              onBackToCamera={() => setViewMode('camera')}
+            />
           </div>
         )}
 
@@ -122,7 +132,7 @@ export function RoomClient({ code, initialState }: RoomClientProps) {
         {viewMode === 'editor' && (
           <div className="w-full">
             <PhotoStripEditor
-              onBack={() => setViewMode('camera')}
+              onBack={() => setViewMode('review')}
             />
           </div>
         )}

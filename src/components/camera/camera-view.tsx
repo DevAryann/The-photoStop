@@ -31,12 +31,14 @@ interface CapturedPhoto {
 type CapturePhase = 'idle' | 'countdown' | 'capturing' | 'pause' | 'complete'
 
 interface CameraViewProps {
+  onReviewOpen?: () => void
   onEditorOpen?: () => void
+  onBackToCamera?: () => void
 }
 
-export function CameraView({ onEditorOpen }: CameraViewProps = {}) {
+export function CameraView({ onReviewOpen, onEditorOpen, onBackToCamera }: CameraViewProps = {}) {
   const { status, error, videoRef, streamRef, startCamera, stopCamera } = useCamera()
-  const { setPhotos: setContextPhotos } = usePhotoStrip()
+  const { setPhotos: setContextPhotos, photos: contextPhotos } = usePhotoStrip()
   const [photos, setPhotos] = useState<CapturedPhoto[]>([])
   const [capturePhase, setCapturePhase] = useState<CapturePhase>('idle')
   const [countdown, setCountdown] = useState<number>(3)
@@ -182,15 +184,18 @@ export function CameraView({ onEditorOpen }: CameraViewProps = {}) {
    * Continue to editor: transfer photos to context and navigate
    */
   const handleContinueToEditor = useCallback(() => {
-    if (photos.length !== 4) {
+    const photosToReview = capturePhase === 'complete' && photos.length === 4 ? photos : contextPhotos
+    if (photosToReview.length !== 4) {
       console.error('[Camera] Not all photos ready')
       return
     }
 
     console.log('[Camera] Transferring 4 photos to editor context')
 
-    // Transfer photos to context for editor
-    setContextPhotos(photos)
+    // Transfer photos to context for editor (reuse if already in context, else use local)
+    if (photos.length === 4) {
+      setContextPhotos(photos)
+    }
 
     // Reset local state
     setPhotos([])
@@ -203,33 +208,42 @@ export function CameraView({ onEditorOpen }: CameraViewProps = {}) {
     if (onEditorOpen) {
       onEditorOpen()
     }
-  }, [photos, stopCamera, setContextPhotos, onEditorOpen])
+  }, [photos, capturePhase, contextPhotos, stopCamera, setContextPhotos, onEditorOpen])
 
   /**
-   * Cleanup timers and object URLs on unmount
+   * Go back from review screen: keep photos in context, return to camera
    */
-  useEffect(() => {
-    return () => {
-      // Clear any pending timers
-      if (timerRef.current) {
-        clearTimeout(timerRef.current)
-      }
-
-      // Revoke all object URLs on unmount
-      photos.forEach((photo) => {
-        URL.revokeObjectURL(photo.objectUrl)
-      })
+  const handleBackFromReview = useCallback(() => {
+    console.log('[Camera] Going back from review to camera')
+    setPhotos([])
+    setCapturePhase('idle')
+    startCamera()
+    if (onBackToCamera) {
+      onBackToCamera()
     }
-  }, [])
+  }, [startCamera, onBackToCamera])
 
-  // IMPORTANT: Check if all 4 photos are captured (complete phase)
-  if (capturePhase === 'complete' && photos.length === 4) {
-    console.log('[CameraView] Rendering 4-photo grid')
+  // Auto-transition to review when capture completes
+  useEffect(() => {
+    if (capturePhase === 'complete' && photos.length === 4 && onReviewOpen) {
+      // Transfer photos to context before transitioning to review mode
+      // so the review-mode instance can display them from context
+      setContextPhotos(photos)
+      onReviewOpen()
+    }
+  }, [capturePhase, photos.length, onReviewOpen, photos, setContextPhotos])
+
+  // Review screen: show 4 photos from either local capture or context (from editor return)
+  // Only render this if we're in review mode (onReviewOpen not provided) or transitioning
+  const photosToReview = capturePhase === 'complete' && photos.length === 4 ? photos : contextPhotos
+  if (photosToReview.length === 4 && !onReviewOpen) {
+    // Only show inline review if onReviewOpen is NOT provided (we're already in review mode)
+    console.log('[CameraView] Rendering 4-photo review grid')
     return (
       <div className="w-full flex flex-col items-center gap-6">
         {/* 4-Photo Grid */}
         <div className="w-full grid grid-cols-2 gap-3">
-          {photos.map((photo, index) => (
+          {photosToReview.map((photo, index) => (
             <div
               key={photo.objectUrl}
               className="aspect-[4/3] rounded-lg overflow-hidden bg-[var(--canvas)] border border-[var(--border)]"
