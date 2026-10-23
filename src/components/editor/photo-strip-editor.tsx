@@ -1,7 +1,12 @@
 'use client'
 
-import { usePhotoStrip } from '@/context/photo-strip-context'
-import { useState } from 'react'
+import {
+  CAPTION_MAX_LENGTH,
+  MAX_STICKERS,
+  usePhotoStrip,
+  type PhotoStripSticker,
+} from '@/context/photo-strip-context'
+import { useMemo, useState } from 'react'
 
 /**
  * Photo Strip Editor V1
@@ -10,6 +15,7 @@ import { useState } from 'react'
  * - Vertical stack of 4 photos
  * - Background color options
  * - Strip style presets
+ * - Built-in emoji stickers and an optional bottom caption
  * - Real-time preview
  * - Back button to return to capture
  * - Export to PNG with selected styling
@@ -58,6 +64,83 @@ const STRIP_STYLES: StripStyleOption[] = [
   },
 ]
 
+const STICKER_OPTIONS = [
+  { label: 'Heart', emoji: '❤️' },
+  { label: 'Star', emoji: '⭐' },
+  { label: 'Sparkle', emoji: '✨' },
+  { label: 'Flower', emoji: '🌸' },
+  { label: 'Smiley', emoji: '😊' },
+]
+
+// Decoration coordinates and typography are shared by the SVG preview and PNG canvas.
+const PHOTO_WIDTH = 1080
+const PHOTO_HEIGHT = 810 // 4:3 aspect ratio
+const STICKER_FONT_SIZE = 120
+const EMOJI_FONT_FAMILY = '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif'
+const CAPTION_FONT_FAMILY = 'system-ui, -apple-system, "Segoe UI", sans-serif'
+const CAPTION_FONT_SIZE = 42
+const CAPTION_LINE_HEIGHT = 58
+const CAPTION_PADDING = 24
+const CAPTION_FONT = `500 ${CAPTION_FONT_SIZE}px ${CAPTION_FONT_FAMILY}`
+
+interface CaptionLayout {
+  lines: string[]
+  height: number
+}
+
+function getStickerPlacement(slot: number) {
+  const isTopRight = slot < 4
+  return {
+    photoIndex: slot % 4,
+    x: PHOTO_WIDTH * (isTopRight ? 0.89 : 0.11),
+    y: PHOTO_HEIGHT * (isTopRight ? 0.15 : 0.85),
+    corner: isTopRight ? 'top right' : 'bottom left',
+  }
+}
+
+function getCaptionLayout(caption: string): CaptionLayout | null {
+  const text = caption.trim().replace(/\s+/g, ' ')
+  if (!text) return null
+
+  const ctx = typeof document === 'undefined'
+    ? null
+    : document.createElement('canvas').getContext('2d')
+  if (ctx) ctx.font = CAPTION_FONT
+  const measure = (value: string) => ctx?.measureText(value).width ?? value.length * CAPTION_FONT_SIZE
+  const maxWidth = PHOTO_WIDTH - CAPTION_PADDING * 4
+  const lines: string[] = []
+  let line = ''
+
+  for (const word of text.split(' ')) {
+    const candidate = line ? `${line} ${word}` : word
+    if (measure(candidate) <= maxWidth) {
+      line = candidate
+      continue
+    }
+    if (line) lines.push(line)
+    line = ''
+    // Also wrap long words rather than clipping them or shrinking the photos.
+    for (const character of word) {
+      if (line && measure(line + character) > maxWidth) {
+        lines.push(line)
+        line = character
+      } else {
+        line += character
+      }
+    }
+  }
+  if (line) lines.push(line)
+
+  return {
+    lines,
+    height: CAPTION_PADDING * 2 + lines.length * CAPTION_LINE_HEIGHT,
+  }
+}
+
+function getCaptionColor(backgroundColor: string) {
+  return backgroundColor.toLowerCase() === '#000000' ? '#ffffff' : '#1a1a1a'
+}
+
 /**
  * Renders the photo strip onto a canvas and resolves with the resulting PNG Blob.
  * Shared by both download and share paths so both actions produce identical output.
@@ -65,11 +148,12 @@ const STRIP_STYLES: StripStyleOption[] = [
 async function buildPhotoStripBlob(
   photos: Array<{ objectUrl: string }>,
   backgroundColor: string,
-  stripStyle: 'plain' | 'polaroid' | 'retro'
+  stripStyle: 'plain' | 'polaroid' | 'retro',
+  stickers: PhotoStripSticker[],
+  caption: string
 ): Promise<Blob> {
-  // High resolution export: 1080px width, 4:3 aspect ratio × 4 photos
-  const PHOTO_WIDTH = 1080
-  const PHOTO_HEIGHT = 810 // 4:3 aspect ratio
+  // Keep the existing high-resolution photo dimensions and style settings.
+  const captionLayout = getCaptionLayout(caption)
 
   // Style configuration at export resolution
   const styles = {
@@ -100,7 +184,8 @@ async function buildPhotoStripBlob(
     style.photoGap * 3 +
     (stripStyle === 'polaroid' ? 96 : 0) +
     style.containerPadding * 2 +
-    style.containerBorder * 2
+    style.containerBorder * 2 +
+    (captionLayout ? style.photoGap + captionLayout.height : 0)
 
   const canvas = document.createElement('canvas')
   canvas.width = totalWidth
@@ -129,7 +214,7 @@ async function buildPhotoStripBlob(
   // Load and draw each photo
   let currentY = style.containerPadding + style.containerBorder / 2
 
-  for (const photo of photos) {
+  for (const [index, photo] of photos.entries()) {
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
       const element = new Image()
       element.crossOrigin = 'anonymous'
@@ -149,7 +234,34 @@ async function buildPhotoStripBlob(
     // Draw photo with aspect ratio preservation
     ctx.drawImage(img, currentX + style.photoBorder, currentY + style.photoBorder, PHOTO_WIDTH - style.photoBorder * 2, PHOTO_HEIGHT - style.photoBorder * 2)
 
+    ctx.save()
+    ctx.font = `${STICKER_FONT_SIZE}px ${EMOJI_FONT_FAMILY}`
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillStyle = '#1a1a1a'
+    for (const sticker of stickers) {
+      const placement = getStickerPlacement(sticker.slot)
+      if (placement.photoIndex === index) {
+        ctx.fillText(sticker.emoji, currentX + placement.x, currentY + placement.y)
+      }
+    }
+    ctx.restore()
+
     currentY += PHOTO_HEIGHT + style.photoGap
+  }
+
+  if (captionLayout) {
+    ctx.font = CAPTION_FONT
+    ctx.fillStyle = getCaptionColor(backgroundColor)
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'alphabetic'
+    captionLayout.lines.forEach((line, index) => {
+      ctx.fillText(
+        line,
+        style.containerPadding + style.containerBorder / 2 + PHOTO_WIDTH / 2,
+        currentY + CAPTION_PADDING + CAPTION_FONT_SIZE + index * CAPTION_LINE_HEIGHT
+      )
+    })
   }
 
   // Convert canvas to Blob
@@ -175,8 +287,11 @@ function canShareFiles(): boolean {
 }
 
 export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
-  const { photos, backgroundColor, setBackgroundColor, stripStyle, setStripStyle } =
-    usePhotoStrip()
+  const {
+    photos, backgroundColor, setBackgroundColor, stripStyle, setStripStyle,
+    stickers, addSticker, removeSticker, caption, setCaption,
+  } = usePhotoStrip()
+  const captionLayout = useMemo(() => getCaptionLayout(caption), [caption])
   const [isExporting, setIsExporting] = useState(false)
   const [isSharing, setIsSharing] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
@@ -189,7 +304,7 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
     setExportError(null)
     setShareMessage(null)
     try {
-      const blob = await buildPhotoStripBlob(photos, backgroundColor, stripStyle)
+      const blob = await buildPhotoStripBlob(photos, backgroundColor, stripStyle, stickers, caption)
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -210,7 +325,7 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
     setExportError(null)
     setShareMessage(null)
     try {
-      const blob = await buildPhotoStripBlob(photos, backgroundColor, stripStyle)
+      const blob = await buildPhotoStripBlob(photos, backgroundColor, stripStyle, stickers, caption)
       const file = new File([blob], 'photobooth-strip.png', { type: 'image/png' })
       await navigator.share({
         files: [file],
@@ -287,15 +402,63 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
           {photos.map((photo, index) => (
             <div
               key={photo.objectUrl}
-              className={`w-full aspect-[4/3] rounded overflow-hidden bg-[var(--canvas)] flex-shrink-0 ${getPhotoClasses()}`}
+              className={`relative w-full aspect-[4/3] rounded overflow-hidden bg-[var(--canvas)] flex-shrink-0 ${getPhotoClasses()}`}
             >
               <img
                 src={photo.objectUrl}
                 alt={`Photo ${index + 1}`}
                 className="w-full h-full object-cover"
               />
+              <svg
+                viewBox={`0 0 ${PHOTO_WIDTH} ${PHOTO_HEIGHT}`}
+                className="absolute inset-0 w-full h-full pointer-events-none"
+                aria-hidden="true"
+              >
+                {stickers.map((sticker) => {
+                  const placement = getStickerPlacement(sticker.slot)
+                  return placement.photoIndex === index ? (
+                    <text
+                      key={sticker.id}
+                      x={placement.x}
+                      y={placement.y}
+                      textAnchor="middle"
+                      dominantBaseline="central"
+                      fontFamily={EMOJI_FONT_FAMILY}
+                      fontSize={STICKER_FONT_SIZE}
+                      fill="#1a1a1a"
+                    >
+                      {sticker.emoji}
+                    </text>
+                  ) : null
+                })}
+              </svg>
             </div>
           ))}
+          {captionLayout && (
+            <svg
+              viewBox={`0 0 ${PHOTO_WIDTH} ${captionLayout.height}`}
+              width={PHOTO_WIDTH}
+              height={captionLayout.height}
+              className="w-full h-auto flex-shrink-0"
+              role="img"
+              aria-label={`Caption: ${caption.trim()}`}
+            >
+              {captionLayout.lines.map((line, index) => (
+                <text
+                  key={index}
+                  x={PHOTO_WIDTH / 2}
+                  y={CAPTION_PADDING + CAPTION_FONT_SIZE + index * CAPTION_LINE_HEIGHT}
+                  textAnchor="middle"
+                  fontFamily={CAPTION_FONT_FAMILY}
+                  fontSize={CAPTION_FONT_SIZE}
+                  fontWeight={500}
+                  fill={getCaptionColor(backgroundColor)}
+                >
+                  {line}
+                </text>
+              ))}
+            </svg>
+          )}
         </div>
       </div>
 
@@ -353,12 +516,86 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
         </div>
       </div>
 
+      {/* Stickers */}
+      <fieldset className="w-full flex flex-col gap-3">
+        <legend className="text-sm font-medium text-[var(--text-primary)] mb-3">
+          Stickers
+        </legend>
+        <div className="grid grid-cols-5 gap-2">
+          {STICKER_OPTIONS.map((option) => (
+            <button
+              key={option.emoji}
+              type="button"
+              onClick={() => addSticker(option.emoji)}
+              disabled={stickers.length >= MAX_STICKERS}
+              aria-label={`Add ${option.label.toLowerCase()} sticker`}
+              aria-describedby="sticker-help"
+              className="min-h-11 py-3 px-1 rounded-lg border-2 border-[var(--border)] hover:border-[var(--border-active)] transition-colors flex flex-col items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
+            >
+              <span className="text-2xl" aria-hidden="true">{option.emoji}</span>
+              <span className="text-xs text-[var(--text-secondary)]">{option.label}</span>
+            </button>
+          ))}
+        </div>
+        <p id="sticker-help" className="text-xs text-[var(--text-secondary)]" role="status">
+          {stickers.length === MAX_STICKERS
+            ? 'All 8 corners are used. Remove a sticker to add another.'
+            : `${stickers.length} of ${MAX_STICKERS} stickers · Added to photo corners.`}
+        </p>
+        {stickers.length > 0 && (
+          <ul className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {stickers.map((sticker) => {
+              const placement = getStickerPlacement(sticker.slot)
+              const label = STICKER_OPTIONS.find((option) => option.emoji === sticker.emoji)?.label ?? 'Emoji'
+              return (
+                <li key={sticker.id}>
+                  <button
+                    type="button"
+                    onClick={() => removeSticker(sticker.id)}
+                    aria-label={`Remove ${label.toLowerCase()} sticker from photo ${placement.photoIndex + 1}, ${placement.corner}`}
+                    className="w-full min-h-11 px-3 py-2 rounded-lg border border-[var(--border)] hover:border-[var(--border-active)] transition-colors flex items-center justify-between gap-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
+                  >
+                    <span className="flex items-center gap-2">
+                      <span className="text-xl" aria-hidden="true">{sticker.emoji}</span>
+                      <span className="text-sm">{label} · Photo {placement.photoIndex + 1}</span>
+                    </span>
+                    <span className="text-xs text-[var(--text-secondary)]" aria-hidden="true">Remove</span>
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </fieldset>
+
+      {/* Optional caption */}
+      <div className="w-full flex flex-col gap-3">
+        <label htmlFor="strip-caption" className="text-sm font-medium text-[var(--text-primary)]">
+          Caption <span className="font-normal text-[var(--text-secondary)]">(optional)</span>
+        </label>
+        <input
+          id="strip-caption"
+          type="text"
+          value={caption}
+          onChange={(event) => setCaption(event.target.value)}
+          maxLength={CAPTION_MAX_LENGTH}
+          autoComplete="off"
+          placeholder="e.g. A day to remember"
+          aria-describedby="caption-help caption-count"
+          className="w-full min-w-0 px-4 py-3 rounded-lg bg-[var(--surface)] border border-[var(--border)] text-base text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
+        />
+        <div className="flex items-start justify-between gap-3 text-xs text-[var(--text-secondary)]">
+          <p id="caption-help">Shown below the photos. Leave blank for no caption.</p>
+          <span id="caption-count" className="flex-shrink-0 tabular-nums">{caption.length}/{CAPTION_MAX_LENGTH}</span>
+        </div>
+      </div>
+
       {/* Action Buttons */}
       <div className="w-full flex flex-col gap-3">
-        <div className="flex gap-3 pt-4">
+        <div className="flex flex-wrap gap-3 pt-4">
           <button
             onClick={onBack}
-            className="flex-1 px-6 py-3 rounded-lg border border-[var(--border-active)] text-[var(--text-primary)] hover:bg-[var(--surface)] transition-colors font-medium"
+            className="flex-1 px-4 sm:px-6 py-3 whitespace-nowrap rounded-lg border border-[var(--border-active)] text-[var(--text-primary)] hover:bg-[var(--surface)] transition-colors font-medium"
           >
             ← Back
           </button>
@@ -367,7 +604,7 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
           <button
             onClick={handleExport}
             disabled={isBusy}
-            className="flex-1 px-6 py-3 rounded-lg bg-[var(--surface)] border border-[var(--border-active)] text-[var(--text-primary)] font-semibold hover:bg-[var(--canvas)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex-1 px-4 sm:px-6 py-3 whitespace-nowrap rounded-lg bg-[var(--surface)] border border-[var(--border-active)] text-[var(--text-primary)] font-semibold hover:bg-[var(--canvas)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             aria-label="Download photo strip as PNG"
           >
             {isExporting ? 'Exporting…' : 'Download'}
@@ -378,7 +615,7 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
             <button
               onClick={handleShare}
               disabled={isBusy}
-              className="flex-1 px-6 py-3 rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] text-white font-semibold hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex-1 px-4 sm:px-6 py-3 whitespace-nowrap rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] text-white font-semibold hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
               aria-label="Share photo strip"
             >
               {isSharing ? 'Sharing…' : 'Share'}

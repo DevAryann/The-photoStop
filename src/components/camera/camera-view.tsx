@@ -38,7 +38,7 @@ interface CameraViewProps {
 
 export function CameraView({ onReviewOpen, onEditorOpen, onBackToCamera }: CameraViewProps = {}) {
   const { status, error, videoRef, streamRef, startCamera, stopCamera } = useCamera()
-  const { setPhotos: setContextPhotos, photos: contextPhotos } = usePhotoStrip()
+  const { setPhotos: setContextPhotos, photos: contextPhotos, clearPhotos: clearContextPhotos } = usePhotoStrip()
   const [photos, setPhotos] = useState<CapturedPhoto[]>([])
   const [capturePhase, setCapturePhase] = useState<CapturePhase>('idle')
   const [countdown, setCountdown] = useState<number>(3)
@@ -174,11 +174,16 @@ export function CameraView({ onReviewOpen, onEditorOpen, onBackToCamera }: Camer
       URL.revokeObjectURL(photo.objectUrl)
     })
     setPhotos([])
+    clearContextPhotos()
     setCapturePhase('idle')
 
-    // Restart camera
-    startCamera()
-  }, [photos, startCamera])
+    // Review owns no camera stream; return through the existing navigation callback.
+    if (onBackToCamera) {
+      onBackToCamera()
+    } else {
+      startCamera()
+    }
+  }, [photos, clearContextPhotos, startCamera, onBackToCamera])
 
   /**
    * Continue to editor: transfer photos to context and navigate
