@@ -4,6 +4,7 @@ import {
   CAPTION_MAX_LENGTH,
   MAX_STICKERS,
   usePhotoStrip,
+  type PhotoFilter,
   type PhotoStripSticker,
 } from '@/context/photo-strip-context'
 import { useMemo, useState } from 'react'
@@ -13,6 +14,7 @@ import { useMemo, useState } from 'react'
  *
  * Displays captured photos in a photobooth strip layout with:
  * - Vertical stack of 4 photos
+ * - Reversible photo filter presets
  * - Background color options
  * - Strip style presets
  * - Built-in emoji stickers and an optional bottom caption
@@ -36,6 +38,11 @@ interface StripStyleOption {
   label: string
   value: 'plain' | 'polaroid' | 'retro'
   description: string
+}
+
+interface FilterOption {
+  label: string
+  value: PhotoFilter
 }
 
 const BACKGROUND_OPTIONS: BackgroundOption[] = [
@@ -63,6 +70,21 @@ const STRIP_STYLES: StripStyleOption[] = [
     description: 'Colored borders, film strip style',
   },
 ]
+
+const FILTER_OPTIONS: FilterOption[] = [
+  { label: 'Original', value: 'original' },
+  { label: 'Vintage', value: 'vintage' },
+  { label: 'Grayscale', value: 'grayscale' },
+  { label: 'Warm', value: 'warm' },
+]
+
+// Reused by the DOM preview and Canvas renderer so every output gets the same grade.
+const PHOTO_FILTER_CSS: Record<PhotoFilter, string> = {
+  original: 'none',
+  vintage: 'sepia(35%) saturate(85%) contrast(92%) brightness(106%)',
+  grayscale: 'grayscale(100%)',
+  warm: 'sepia(18%) saturate(118%) hue-rotate(-8deg) brightness(103%)',
+}
 
 const STICKER_OPTIONS = [
   { label: 'Heart', emoji: '❤️' },
@@ -149,6 +171,7 @@ async function buildPhotoStripBlob(
   photos: Array<{ objectUrl: string }>,
   backgroundColor: string,
   stripStyle: 'plain' | 'polaroid' | 'retro',
+  photoFilter: PhotoFilter,
   stickers: PhotoStripSticker[],
   caption: string
 ): Promise<Blob> {
@@ -231,8 +254,11 @@ async function buildPhotoStripBlob(
       ctx.fillRect(currentX, currentY, PHOTO_WIDTH, PHOTO_HEIGHT)
     }
 
-    // Draw photo with aspect ratio preservation
+    // Filter only the photo pixels; stickers, borders, and captions stay unchanged.
+    ctx.save()
+    ctx.filter = PHOTO_FILTER_CSS[photoFilter]
     ctx.drawImage(img, currentX + style.photoBorder, currentY + style.photoBorder, PHOTO_WIDTH - style.photoBorder * 2, PHOTO_HEIGHT - style.photoBorder * 2)
+    ctx.restore()
 
     ctx.save()
     ctx.font = `${STICKER_FONT_SIZE}px ${EMOJI_FONT_FAMILY}`
@@ -289,6 +315,7 @@ function canShareFiles(): boolean {
 export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
   const {
     photos, backgroundColor, setBackgroundColor, stripStyle, setStripStyle,
+    photoFilter, setPhotoFilter,
     stickers, addSticker, removeSticker, caption, setCaption,
   } = usePhotoStrip()
   const captionLayout = useMemo(() => getCaptionLayout(caption), [caption])
@@ -304,7 +331,7 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
     setExportError(null)
     setShareMessage(null)
     try {
-      const blob = await buildPhotoStripBlob(photos, backgroundColor, stripStyle, stickers, caption)
+      const blob = await buildPhotoStripBlob(photos, backgroundColor, stripStyle, photoFilter, stickers, caption)
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -325,7 +352,7 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
     setExportError(null)
     setShareMessage(null)
     try {
-      const blob = await buildPhotoStripBlob(photos, backgroundColor, stripStyle, stickers, caption)
+      const blob = await buildPhotoStripBlob(photos, backgroundColor, stripStyle, photoFilter, stickers, caption)
       const file = new File([blob], 'photobooth-strip.png', { type: 'image/png' })
       await navigator.share({
         files: [file],
@@ -408,6 +435,7 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
                 src={photo.objectUrl}
                 alt={`Photo ${index + 1}`}
                 className="w-full h-full object-cover"
+                style={{ filter: PHOTO_FILTER_CSS[photoFilter] }}
               />
               <svg
                 viewBox={`0 0 ${PHOTO_WIDTH} ${PHOTO_HEIGHT}`}
@@ -461,6 +489,48 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
           )}
         </div>
       </div>
+
+      {/* Photo Filter Options */}
+      <fieldset className="w-full flex flex-col gap-3">
+        <legend className="text-sm font-medium text-[var(--text-primary)] mb-3">
+          Filter
+        </legend>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {FILTER_OPTIONS.map((option) => {
+            const isActive = photoFilter === option.value
+            return (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => setPhotoFilter(option.value)}
+                aria-pressed={isActive}
+                className={`min-h-11 p-2 rounded-lg border-2 transition-colors flex flex-col gap-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] ${
+                  isActive
+                    ? 'border-[var(--primary)] bg-[var(--primary)]/5'
+                    : 'border-[var(--border)] hover:border-[var(--border-active)]'
+                }`}
+              >
+                <span className="block w-full aspect-[4/3] rounded overflow-hidden bg-[var(--canvas)]" aria-hidden="true">
+                  <img
+                    src={photos[0].objectUrl}
+                    alt=""
+                    className="w-full h-full object-cover"
+                    style={{ filter: PHOTO_FILTER_CSS[option.value] }}
+                  />
+                </span>
+                <span className="flex items-center justify-between gap-2 px-1">
+                  <span className="text-xs font-medium">{option.label}</span>
+                  {isActive && (
+                    <span className="text-[10px] text-[var(--primary)]" aria-hidden="true">
+                      Selected
+                    </span>
+                  )}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </fieldset>
 
       {/* Background Color Options */}
       <div className="w-full flex flex-col gap-3">

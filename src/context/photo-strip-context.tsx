@@ -10,6 +10,8 @@ interface CapturedPhoto {
 export const MAX_STICKERS = 8
 export const CAPTION_MAX_LENGTH = 80
 
+export type PhotoFilter = 'original' | 'vintage' | 'grayscale' | 'warm'
+
 export interface PhotoStripSticker {
   id: string
   emoji: string
@@ -24,6 +26,8 @@ interface PhotoStripContextType {
   setBackgroundColor: (color: string) => void
   stripStyle: 'plain' | 'polaroid' | 'retro'
   setStripStyle: (style: 'plain' | 'polaroid' | 'retro') => void
+  photoFilter: PhotoFilter
+  setPhotoFilter: (filter: PhotoFilter) => void
   stickers: PhotoStripSticker[]
   addSticker: (emoji: string) => void
   removeSticker: (id: string) => void
@@ -37,6 +41,7 @@ export function PhotoStripProvider({ children }: { children: ReactNode }) {
   const [photos, setPhotos] = useState<CapturedPhoto[]>([])
   const [backgroundColor, setBackgroundColor] = useState<string>('#ffffff')
   const [stripStyle, setStripStyle] = useState<'plain' | 'polaroid' | 'retro'>('plain')
+  const [photoFilter, setPhotoFilter] = useState<PhotoFilter>('original')
   const [stickers, setStickers] = useState<PhotoStripSticker[]>([])
   const [caption, setCaptionValue] = useState('')
 
@@ -68,6 +73,7 @@ export function PhotoStripProvider({ children }: { children: ReactNode }) {
     setPhotos([])
     setBackgroundColor('#ffffff')
     setStripStyle('plain')
+    setPhotoFilter('original')
     setStickers([])
     setCaptionValue('')
   }, [photos])
@@ -82,6 +88,8 @@ export function PhotoStripProvider({ children }: { children: ReactNode }) {
         setBackgroundColor,
         stripStyle,
         setStripStyle,
+        photoFilter,
+        setPhotoFilter,
         stickers,
         addSticker,
         removeSticker,
