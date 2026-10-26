@@ -7,7 +7,7 @@ import {
   type PhotoFilter,
   type PhotoStripSticker,
 } from '@/context/photo-strip-context'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 /**
  * Photo Strip Editor V1
@@ -104,6 +104,7 @@ const CAPTION_FONT_SIZE = 42
 const CAPTION_LINE_HEIGHT = 58
 const CAPTION_PADDING = 24
 const CAPTION_FONT = `500 ${CAPTION_FONT_SIZE}px ${CAPTION_FONT_FAMILY}`
+const EXPORT_FILENAME = 'photobooth-strip.png'
 
 interface CaptionLayout {
   lines: string[]
@@ -299,6 +300,29 @@ async function buildPhotoStripBlob(
   })
 }
 
+function downloadPhotoStripBlob(blob: Blob) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = EXPORT_FILENAME
+  try {
+    document.body.appendChild(link)
+    link.click()
+  } finally {
+    link.remove()
+    // Give mobile browsers time to accept the download navigation.
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+}
+
+async function sharePhotoStripBlob(blob: Blob) {
+  const file = new File([blob], EXPORT_FILENAME, { type: 'image/png' })
+  await navigator.share({
+    files: [file],
+    title: 'My Photo Strip',
+  })
+}
+
 /** Returns true when the browser supports sharing PNG files via the Web Share API. */
 function canShareFiles(): boolean {
   if (typeof navigator === 'undefined' || !navigator.share || !navigator.canShare) {
@@ -323,8 +347,41 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
   const [isSharing, setIsSharing] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
   const [shareMessage, setShareMessage] = useState<string | null>(null)
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false)
+  const [isGeneratingPreview, setIsGeneratingPreview] = useState(false)
+  const [previewBlob, setPreviewBlob] = useState<Blob | null>(null)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const [previewActionError, setPreviewActionError] = useState<string | null>(null)
+  const previewDialogRef = useRef<HTMLDialogElement>(null)
+  const previewTriggerRef = useRef<HTMLButtonElement>(null)
+  const previewGenerationRef = useRef(0)
 
-  const isBusy = isExporting || isSharing
+  const isBusy = isExporting || isSharing || isGeneratingPreview
+
+  useEffect(() => {
+    if (!isPreviewOpen) return
+
+    const dialog = previewDialogRef.current
+    if (dialog && !dialog.open) dialog.showModal()
+
+    return () => {
+      if (dialog?.open) dialog.close()
+    }
+  }, [isPreviewOpen])
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl)
+    }
+  }, [previewUrl])
+
+  useEffect(() => {
+    return () => {
+      // Ignore any render that completes after the editor has unmounted.
+      previewGenerationRef.current += 1
+    }
+  }, [])
 
   const handleExport = async () => {
     setIsExporting(true)
@@ -332,14 +389,7 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
     setShareMessage(null)
     try {
       const blob = await buildPhotoStripBlob(photos, backgroundColor, stripStyle, photoFilter, stickers, caption)
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = 'photobooth-strip.png'
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
+      downloadPhotoStripBlob(blob)
     } catch (err) {
       setExportError(err instanceof Error ? err.message : 'Export failed')
     } finally {
@@ -353,17 +403,92 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
     setShareMessage(null)
     try {
       const blob = await buildPhotoStripBlob(photos, backgroundColor, stripStyle, photoFilter, stickers, caption)
-      const file = new File([blob], 'photobooth-strip.png', { type: 'image/png' })
-      await navigator.share({
-        files: [file],
-        title: 'My Photo Strip',
-      })
+      await sharePhotoStripBlob(blob)
     } catch (err) {
       // AbortError means the user dismissed the share sheet — not an error
       if (err instanceof Error && err.name === 'AbortError') {
         // do nothing
       } else {
         setExportError(err instanceof Error ? err.message : 'Share failed')
+      }
+    } finally {
+      setIsSharing(false)
+    }
+  }
+
+  const handlePreview = async () => {
+    const generation = ++previewGenerationRef.current
+    setIsPreviewOpen(true)
+    setIsGeneratingPreview(true)
+    setPreviewBlob(null)
+    setPreviewUrl(null)
+    setPreviewError(null)
+    setPreviewActionError(null)
+    setExportError(null)
+    setShareMessage(null)
+
+    try {
+      const blob = await buildPhotoStripBlob(
+        photos,
+        backgroundColor,
+        stripStyle,
+        photoFilter,
+        stickers,
+        caption
+      )
+      if (generation !== previewGenerationRef.current) return
+
+      const url = URL.createObjectURL(blob)
+      setPreviewBlob(blob)
+      setPreviewUrl(url)
+    } catch {
+      if (generation !== previewGenerationRef.current) return
+      setPreviewError(
+        'We couldn’t generate the export preview. Your edits are safe—please try again.'
+      )
+    } finally {
+      if (generation === previewGenerationRef.current) {
+        setIsGeneratingPreview(false)
+      }
+    }
+  }
+
+  const handleClosePreview = () => {
+    previewGenerationRef.current += 1
+    setIsPreviewOpen(false)
+    setIsGeneratingPreview(false)
+    setPreviewBlob(null)
+    setPreviewUrl(null)
+    setPreviewError(null)
+    setPreviewActionError(null)
+    window.requestAnimationFrame(() => previewTriggerRef.current?.focus())
+  }
+
+  const handlePreviewDownload = () => {
+    if (!previewBlob) return
+
+    setPreviewActionError(null)
+    try {
+      downloadPhotoStripBlob(previewBlob)
+    } catch {
+      setPreviewActionError(
+        'The download couldn’t start. Please try again or use Download in the editor.'
+      )
+    }
+  }
+
+  const handlePreviewShare = async () => {
+    if (!previewBlob || !canShareFiles()) return
+
+    setIsSharing(true)
+    setPreviewActionError(null)
+    try {
+      await sharePhotoStripBlob(previewBlob)
+    } catch (err) {
+      if (!(err instanceof Error && err.name === 'AbortError')) {
+        setPreviewActionError(
+          'We couldn’t open sharing. Please try again or download the PNG to share it from your device.'
+        )
       }
     } finally {
       setIsSharing(false)
@@ -670,6 +795,18 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
             ← Back
           </button>
 
+          {/* Final export preview */}
+          <button
+            ref={previewTriggerRef}
+            type="button"
+            onClick={handlePreview}
+            disabled={isBusy}
+            aria-haspopup="dialog"
+            className="flex-1 px-4 sm:px-6 py-3 whitespace-nowrap rounded-lg border border-[var(--primary)] bg-[var(--primary)]/10 text-[var(--text-primary)] font-semibold hover:bg-[var(--primary)]/15 transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
+          >
+            Preview Export
+          </button>
+
           {/* Download PNG */}
           <button
             onClick={handleExport}
@@ -714,6 +851,178 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
           </div>
         )}
       </div>
+
+      {isPreviewOpen && (
+        <dialog
+          id="export-preview-dialog"
+          ref={previewDialogRef}
+          aria-labelledby="export-preview-title"
+          aria-describedby="export-preview-description"
+          onCancel={(event) => {
+            event.preventDefault()
+            handleClosePreview()
+          }}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) handleClosePreview()
+          }}
+          className="fixed inset-0 m-0 h-dvh max-h-dvh w-full max-w-none overflow-hidden border-0 bg-transparent p-0 text-[var(--text-primary)] backdrop:bg-black/80 backdrop:backdrop-blur-sm sm:m-auto sm:h-[calc(100dvh-3rem)] sm:max-h-[calc(100dvh-3rem)] sm:w-[min(64rem,calc(100vw-3rem))] sm:rounded-xl sm:border sm:border-[var(--border-active)] sm:shadow-[0_24px_80px_rgba(0,0,0,0.55)]"
+        >
+          <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--surface)]">
+            <header className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--border)] px-4 pb-4 pt-[max(1rem,env(safe-area-inset-top))] sm:px-6 sm:pt-5">
+              <div className="min-w-0">
+                <h2 id="export-preview-title" className="text-lg font-semibold sm:text-xl">
+                  Export preview
+                </h2>
+                <p
+                  id="export-preview-description"
+                  className="mt-1 text-sm text-[var(--text-secondary)]"
+                >
+                  This is the exact high-resolution PNG that will be downloaded or shared.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleClosePreview}
+                aria-label="Close export preview"
+                className="inline-flex size-11 shrink-0 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--canvas)] hover:text-[var(--text-primary)] transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
+              >
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 20 20"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M4.75 4.75L15.25 15.25M15.25 4.75L4.75 15.25"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </button>
+            </header>
+
+            <div
+              className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-[var(--background)] p-4 [scrollbar-color:var(--border-active)_var(--background)] [scrollbar-gutter:stable] sm:p-6"
+              aria-busy={isGeneratingPreview}
+            >
+              {isGeneratingPreview && (
+                <div
+                  className="flex min-h-full flex-col items-center justify-center gap-4 py-12 text-center"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <svg
+                    className="size-8 animate-spin text-[var(--primary)] motion-reduce:animate-none"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <circle
+                      cx="12"
+                      cy="12"
+                      r="9"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      opacity="0.25"
+                    />
+                    <path
+                      d="M21 12a9 9 0 0 0-9-9"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                  <div>
+                    <p className="font-medium">Generating your preview…</p>
+                    <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                      Rendering the full-resolution PNG.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {!isGeneratingPreview && previewError && (
+                <div
+                  className="mx-auto flex min-h-full max-w-md flex-col items-center justify-center py-12 text-center"
+                  role="alert"
+                >
+                  <h3 className="text-lg font-semibold">Preview unavailable</h3>
+                  <p className="mt-2 text-sm leading-relaxed text-[var(--text-secondary)]">
+                    {previewError}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handlePreview}
+                    className="mt-5 min-h-11 rounded-lg border border-[var(--primary)] px-5 py-2.5 font-semibold text-[var(--text-primary)] hover:bg-[var(--primary)]/10 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
+                  >
+                    Try again
+                  </button>
+                </div>
+              )}
+
+              {!isGeneratingPreview && previewUrl && (
+                <div className="mx-auto flex min-h-full w-full max-w-xl items-start justify-center">
+                  {/* This is a generated local Blob URL; Next Image optimization does not apply. */}
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={previewUrl}
+                    alt="Final photo strip exactly as it will appear in the exported PNG"
+                    className="block h-auto w-full bg-white shadow-[0_20px_60px_rgba(0,0,0,0.45)]"
+                  />
+                </div>
+              )}
+            </div>
+
+            <footer className="max-h-[55dvh] shrink-0 overflow-y-auto border-t border-[var(--border)] bg-[var(--surface)] px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-4 [scrollbar-color:var(--border-active)_var(--surface)] sm:px-6 sm:pb-4">
+              {previewActionError && (
+                <p
+                  className="mb-3 rounded-lg border border-[var(--error)]/40 bg-[var(--error)]/10 px-3 py-2 text-sm text-[var(--text-primary)]"
+                  role="alert"
+                >
+                  {previewActionError}
+                </p>
+              )}
+              {!fileShareSupported && (
+                <p
+                  id="preview-share-help"
+                  className="mb-3 text-sm text-[var(--text-secondary)]"
+                >
+                  Direct sharing isn’t available in this browser. Download the PNG to share it
+                  from your device.
+                </p>
+              )}
+              <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-3 sm:flex sm:justify-end">
+                <button
+                  type="button"
+                  onClick={handleClosePreview}
+                  className="min-h-11 w-full rounded-lg border border-[var(--border-active)] px-5 py-2.5 font-medium text-[var(--text-primary)] hover:bg-[var(--canvas)] transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] sm:w-auto"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePreviewShare}
+                  disabled={!previewBlob || isSharing || !fileShareSupported}
+                  aria-describedby={!fileShareSupported ? 'preview-share-help' : undefined}
+                  className="min-h-11 w-full rounded-lg border border-[var(--border-active)] bg-[var(--canvas)] px-5 py-2.5 font-semibold text-[var(--text-primary)] hover:border-[var(--primary)] transition-colors disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] sm:w-auto"
+                >
+                  {isSharing ? 'Sharing…' : 'Share'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePreviewDownload}
+                  disabled={!previewBlob || isSharing}
+                  className="min-h-11 w-full rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] px-5 py-2.5 font-semibold text-white hover:opacity-90 transition-opacity disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] sm:w-auto"
+                >
+                  Download PNG
+                </button>
+              </div>
+            </footer>
+          </div>
+        </dialog>
+      )}
 
       {/* Info Text */}
       <p className="text-xs text-[var(--text-tertiary)] text-center">
