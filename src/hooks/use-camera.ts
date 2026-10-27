@@ -57,6 +57,8 @@ export function useCamera(): UseCameraReturn {
   // Store MediaStream in ref to avoid re-renders
   const streamRef = useRef<MediaStream | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
+  // Invalidates camera requests that finish after cancellation or unmount.
+  const requestIdRef = useRef(0)
 
   /**
    * Effect: Attach stream to video element when both are available
@@ -152,9 +154,17 @@ export function useCamera(): UseCameraReturn {
    * Start camera and obtain MediaStream
    */
   const startCamera = useCallback(async () => {
+    const requestId = ++requestIdRef.current
+
     // Reset error state
     setError(null)
     setStatus('requesting')
+
+    // A retry should never leave the previous stream running.
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop())
+      streamRef.current = null
+    }
 
     try {
       // Check if MediaDevices API is supported
@@ -173,6 +183,13 @@ export function useCamera(): UseCameraReturn {
         audio: false,
       })
 
+      // The user may have cancelled or navigated away while the permission
+      // prompt was open. Release a late stream instead of activating it.
+      if (requestId !== requestIdRef.current) {
+        stream.getTracks().forEach((track) => track.stop())
+        return
+      }
+
       console.log('[Camera] getUserMedia success')
       console.log('[Camera] Stream ID:', stream.id)
       console.log('[Camera] Video tracks:', stream.getVideoTracks().map((t) => ({
@@ -188,11 +205,13 @@ export function useCamera(): UseCameraReturn {
       // Transition to active state (triggers re-render with video element)
       setStatus('active')
     } catch (err) {
+      if (requestId !== requestIdRef.current) return
+
       // Handle different error types
       let cameraError: CameraError
 
       if (err instanceof Error) {
-        const errorName = (err as any).name || err.message
+        const errorName = err.name
 
         if (errorName === 'NotAllowedError' || errorName === 'PermissionDeniedError') {
           cameraError = {
@@ -206,7 +225,7 @@ export function useCamera(): UseCameraReturn {
             message: 'No camera found on this device',
           }
           setStatus('unavailable')
-        } else if (errorName === 'NOT_SUPPORTED') {
+        } else if (err.message === 'NOT_SUPPORTED') {
           cameraError = {
             type: 'not_supported',
             message: 'Camera is not supported in this browser',
@@ -236,6 +255,9 @@ export function useCamera(): UseCameraReturn {
    * Stop camera and release MediaStream tracks
    */
   const stopCamera = useCallback(() => {
+    // Prevent an outstanding getUserMedia request from activating later.
+    requestIdRef.current += 1
+
     if (streamRef.current) {
       console.log('[Camera] Stopping camera stream')
       // Stop all tracks (video and audio if any)
@@ -257,9 +279,11 @@ export function useCamera(): UseCameraReturn {
    */
   useEffect(() => {
     return () => {
+      requestIdRef.current += 1
       if (streamRef.current) {
         console.log('[Camera] Cleanup on unmount')
         streamRef.current.getTracks().forEach((track) => track.stop())
+        streamRef.current = null
       }
     }
   }, [])
