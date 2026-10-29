@@ -1,6 +1,9 @@
 import Link from 'next/link'
 import { cookies } from 'next/headers'
-import { validateRoomAccess } from '@/lib/room-validation'
+import {
+  validateRoomAccess,
+  type RoomAccessResult,
+} from '@/lib/room-validation'
 import { RoomClient } from '@/components/room/room-client'
 
 /**
@@ -39,8 +42,8 @@ export default async function RoomPage({ params }: RoomPageProps) {
   const capability = cookieStore.get('session_capability')?.value
 
   // Validate room access server-side
-  // Returns { authorized: true, roomState } or { authorized: false }
-  const accessResult = capability
+  // Returns safe room state + room-local participant label, or unauthorized
+  const accessResult: RoomAccessResult = capability
     ? await validateRoomAccess(code, capability)
     : { authorized: false }
 
@@ -95,11 +98,14 @@ export default async function RoomPage({ params }: RoomPageProps) {
   }
 
   // Access granted - render client component with real-time subscription
-  // TypeScript knows roomState exists because authorized === true
   return (
     <main className="flex-1 flex flex-col items-center justify-center px-6 py-12 sm:px-12 md:px-24">
       <div className="w-full max-w-md flex flex-col items-center gap-8">
-        <RoomClient code={code} initialState={accessResult.roomState!} />
+        <RoomClient
+          code={code}
+          initialState={accessResult.roomState}
+          participant={accessResult.participant}
+        />
       </div>
     </main>
   )

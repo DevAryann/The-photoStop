@@ -1,6 +1,11 @@
 import { createAdminClient } from '@/lib/supabase/admin'
 import { hashCapability, isValidCapabilityFormat } from '@/lib/capability'
 import { isValidRoomCodeFormat } from '@/lib/room-code'
+import {
+  getParticipantDisplayName,
+  type RoomPresenceIdentity,
+  type RoomPresenceKey,
+} from '@/lib/room-presence'
 
 /**
  * Room Access Validation Result
@@ -8,13 +13,17 @@ import { isValidRoomCodeFormat } from '@/lib/room-code'
  * Minimal safe data returned to the page:
  * - authorized: Whether the user has valid access to this room
  * - roomState: Current room state (only if authorized)
+ * - participant: Safe, room-local presence identity (only if authorized)
  *
- * Never exposes: capability hash, room UUID, participant ID, detailed errors
+ * Never exposes: capability hash, room UUID, participant UUID, detailed errors
  */
-export interface RoomAccessResult {
-  authorized: boolean
-  roomState?: 'waiting' | 'active'
-}
+export type RoomAccessResult =
+  | {
+      authorized: true
+      roomState: 'waiting' | 'active'
+      participant: RoomPresenceIdentity
+    }
+  | { authorized: false }
 
 /**
  * Validates room access for the current session
@@ -30,7 +39,7 @@ export interface RoomAccessResult {
  * Security properties:
  * - Uses admin client to query database (bypasses RLS)
  * - Hashes capability before database query (never sends plaintext)
- * - Returns only minimal safe data (authorized flag + state)
+ * - Returns only minimal safe data (authorized flag, state, and room-local label)
  * - Never exposes internal identifiers or detailed error reasons
  * - Same generic response for all unauthorized cases (room missing, expired, wrong capability)
  *
@@ -86,24 +95,40 @@ export async function validateRoomAccess(
       return { authorized: false }
     }
 
-    // Step 2: Verify the capability belongs to a participant in this specific room
+    // Step 2: Verify the capability belongs to a participant in this room and
+    // derive a non-secret, room-local label from the existing join order.
+    // UUIDs and capability hashes remain server-only.
     const { data: participantData, error: participantError } = await supabase
       .from('participants')
-      .select('id')
+      .select('id, capability_hash, joined_at')
       .eq('room_id', roomData.id)
-      .eq('capability_hash', capabilityHash)
-      .limit(1)
-      .single()
+      .order('joined_at', { ascending: true })
+      .order('id', { ascending: true })
 
     // If participant query fails or returns no data, deny access
-    if (participantError || !participantData) {
+    if (participantError || !participantData?.length) {
       return { authorized: false }
     }
+
+    const participantIndex = participantData.findIndex(
+      (participant) => participant.capability_hash === capabilityHash
+    )
+
+    if (participantIndex < 0 || participantIndex > 1) {
+      return { authorized: false }
+    }
+
+    const presenceKey: RoomPresenceKey =
+      participantIndex === 0 ? 'participant-1' : 'participant-2'
 
     // Access granted - return minimal safe data
     return {
       authorized: true,
       roomState: roomData.state as 'waiting' | 'active',
+      participant: {
+        key: presenceKey,
+        displayName: getParticipantDisplayName(presenceKey),
+      },
     }
   } catch (error) {
     // Unexpected error - log server-side, deny access

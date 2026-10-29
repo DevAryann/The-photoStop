@@ -1,74 +1,166 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import {
+  getParticipantDisplayName,
+  isRoomPresenceKey,
+  type RoomPresenceIdentity,
+  type RoomPresenceParticipant,
+} from '@/lib/room-presence'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 
+export type RoomPresenceStatus =
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'error'
+
+interface PresencePayload {
+  participantKey: string
+  displayName: string
+}
+
 /**
- * Subscribe to real-time room state changes via Supabase Broadcast
+ * Subscribe to room state Broadcast and participant Presence on one channel.
  *
  * Uses Realtime Broadcast channels (not Postgres Changes):
- * - No database access required
+ * - No public database access required
  * - No RLS policies needed
  * - Server explicitly publishes state changes after join_room() succeeds
- * - Client receives only what server broadcasts
+ * - Presence uses only server-derived, room-local participant labels
  *
  * Security:
  * - Channel name contains room code (already public/shareable)
  * - Anyone who knows the room code can subscribe to the broadcast channel
- * - Broadcast payload contains only safe state info: { state: 'active' }
- * - No capability tokens, participant IDs, or internal UUIDs exposed
+ * - Realtime payloads contain only safe state and participant labels
+ * - No capability tokens, capability hashes, or internal UUIDs exposed
  * - Room page validates capability server-side before showing content
  * - Subscribing to broadcast does not grant access to room content
  *
  * @param roomCode - Public room code (e.g., "MOON-47")
  * @param initialState - Server-validated initial state from page load
- * @returns Current room state (updates when broadcast received)
+ * @returns Room state, deduplicated online participants, and connection state
  */
 export function useRoomRealtime(
   roomCode: string,
-  initialState: 'waiting' | 'active'
+  initialState: 'waiting' | 'active',
+  participant: RoomPresenceIdentity
 ) {
   const [roomState, setRoomState] = useState<'waiting' | 'active'>(initialState)
+  const [participants, setParticipants] = useState<RoomPresenceParticipant[]>([])
+  const [presenceStatus, setPresenceStatus] =
+    useState<RoomPresenceStatus>('connecting')
+  const [retryCount, setRetryCount] = useState(0)
+
+  const retryPresence = useCallback(() => {
+    setRetryCount((current) => current + 1)
+  }, [])
 
   useEffect(() => {
-    // Only subscribe if still waiting (no need to subscribe if already active)
-    if (initialState === 'active') {
-      return
-    }
-
+    let isCurrentSubscription = true
     const supabase = createClient()
 
-    // Subscribe to broadcast channel for this room
-    // Channel name: room:<CODE> (room code is already public/shareable)
-    // Note: Anyone who knows the room code can subscribe to this channel
-    // This is acceptable because broadcast contains no sensitive data
+    setRoomState(initialState)
+    setParticipants([])
+    setPresenceStatus('connecting')
+
+    const syncParticipants = (channel: RealtimeChannel) => {
+      const state = channel.presenceState<PresencePayload>()
+      const nextParticipants: RoomPresenceParticipant[] = []
+
+      for (const [key, presences] of Object.entries(state)) {
+        if (!isRoomPresenceKey(key)) {
+          continue
+        }
+
+        const displayName = getParticipantDisplayName(key)
+        const hasValidPresence = presences.some(
+          (presence) =>
+            presence.participantKey === key &&
+            presence.displayName === displayName
+        )
+
+        if (hasValidPresence) {
+          nextParticipants.push({
+            key,
+            displayName,
+            isCurrentUser: key === participant.key,
+          })
+        }
+      }
+
+      nextParticipants.sort((a, b) => a.key.localeCompare(b.key))
+
+      if (isCurrentSubscription) {
+        setParticipants(nextParticipants)
+      }
+    }
+
+    // The public topic contains only the room code and safe labels. Room page
+    // access remains protected by the HttpOnly capability validated server-side.
     const channel: RealtimeChannel = supabase
-      .channel(`room:${roomCode}`)
+      .channel(`room:${roomCode}`, {
+        config: { presence: { key: participant.key } },
+      })
       .on(
         'broadcast',
         { event: 'state_change' },
-        (payload: { payload: { state: string } }) => {
-          const newState = payload.payload.state
+        (message: { payload?: { state?: unknown } }) => {
+          const newState = message.payload?.state
 
-          // Use functional update to avoid dependency on roomState
-          // This prevents recreating the subscription when state changes
-          setRoomState((currentState) => {
-            // Only update if transitioning to active (waiting → active)
-            if (newState === 'active' && currentState === 'waiting') {
-              return 'active'
-            }
-            return currentState
-          })
+          if (isCurrentSubscription && newState === 'active') {
+            setRoomState('active')
+          }
         }
       )
-      .subscribe()
+      .on('presence', { event: 'sync' }, () => syncParticipants(channel))
+      .subscribe((status) => {
+        if (!isCurrentSubscription) {
+          return
+        }
 
-    // Cleanup: unsubscribe when component unmounts
+        if (status === 'SUBSCRIBED') {
+          void channel
+            .track({
+              participantKey: participant.key,
+              displayName: participant.displayName,
+            })
+            .then((trackStatus) => {
+              if (!isCurrentSubscription) {
+                return
+              }
+
+              setPresenceStatus(trackStatus === 'ok' ? 'connected' : 'error')
+            })
+            .catch(() => {
+              if (isCurrentSubscription) {
+                setPresenceStatus('error')
+              }
+            })
+          return
+        }
+
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          setPresenceStatus('reconnecting')
+          return
+        }
+
+        if (status === 'CLOSED') {
+          setPresenceStatus('error')
+        }
+      })
+
     return () => {
-      supabase.removeChannel(channel)
+      isCurrentSubscription = false
+      void supabase.removeChannel(channel)
     }
-  }, [roomCode, initialState])
+  }, [roomCode, initialState, participant.displayName, participant.key, retryCount])
 
-  return roomState
+  return {
+    roomState,
+    participants,
+    presenceStatus,
+    retryPresence,
+  }
 }
