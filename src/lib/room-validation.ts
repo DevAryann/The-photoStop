@@ -25,6 +25,13 @@ export type RoomAccessResult =
     }
   | { authorized: false }
 
+export interface AuthorizedRoomCapability {
+  roomId: string
+  participantId: string
+  roomState: 'waiting' | 'active'
+  participant: RoomPresenceIdentity
+}
+
 /**
  * Validates room access for the current session
  *
@@ -60,15 +67,33 @@ export async function validateRoomAccess(
   roomCode: string,
   capability: string
 ): Promise<RoomAccessResult> {
+  const access = await authorizeRoomCapability(roomCode, capability)
+  if (!access) return { authorized: false }
+
+  return {
+    authorized: true,
+    roomState: access.roomState,
+    participant: access.participant,
+  }
+}
+
+/**
+ * Server-only authorization result for room API routes.
+ * Internal IDs must never be serialized to the browser.
+ */
+export async function authorizeRoomCapability(
+  roomCode: string,
+  capability: string
+): Promise<AuthorizedRoomCapability | null> {
   try {
     // Validate room code format (WORD-## pattern)
     if (!isValidRoomCodeFormat(roomCode)) {
-      return { authorized: false }
+      return null
     }
 
     // Validate capability format (base64url, 43 chars)
     if (!isValidCapabilityFormat(capability)) {
-      return { authorized: false }
+      return null
     }
 
     // Hash capability with SHA-256 (same as stored in database)
@@ -92,7 +117,7 @@ export async function validateRoomAccess(
 
     // If room query fails or returns no data, deny access
     if (roomError || !roomData) {
-      return { authorized: false }
+      return null
     }
 
     // Step 2: Verify the capability belongs to a participant in this room and
@@ -107,7 +132,7 @@ export async function validateRoomAccess(
 
     // If participant query fails or returns no data, deny access
     if (participantError || !participantData?.length) {
-      return { authorized: false }
+      return null
     }
 
     const participantIndex = participantData.findIndex(
@@ -115,15 +140,17 @@ export async function validateRoomAccess(
     )
 
     if (participantIndex < 0 || participantIndex > 1) {
-      return { authorized: false }
+      return null
     }
 
     const presenceKey: RoomPresenceKey =
       participantIndex === 0 ? 'participant-1' : 'participant-2'
 
-    // Access granted - return minimal safe data
+    const participant = participantData[participantIndex]
+
     return {
-      authorized: true,
+      roomId: roomData.id,
+      participantId: participant.id,
       roomState: roomData.state as 'waiting' | 'active',
       participant: {
         key: presenceKey,
@@ -133,6 +160,6 @@ export async function validateRoomAccess(
   } catch (error) {
     // Unexpected error - log server-side, deny access
     console.error('[Room Validation] Unexpected error:', error)
-    return { authorized: false }
+    return null
   }
 }

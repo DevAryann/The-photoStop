@@ -2,7 +2,10 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { useCamera } from '@/hooks/use-camera'
-import { usePhotoStrip } from '@/context/photo-strip-context'
+import {
+  usePhotoStrip,
+  type CapturedPhoto,
+} from '@/context/photo-strip-context'
 
 /**
  * Camera View Component
@@ -16,17 +19,14 @@ import { usePhotoStrip } from '@/context/photo-strip-context'
  * - Show all 4 photos after completion
  * - Retake All or Continue to Editor
  *
- * NOT in V2:
+ * Shared Photo Strip V1 publishes completed sets through the room callback;
+ * CameraView itself remains independent of storage and authorization.
+ *
+ * Not handled directly here:
  * - Device switching (front/back camera)
  * - Filters, stickers, effects
- * - Upload or storage
  * - Photo strip layout/editing
  */
-
-interface CapturedPhoto {
-  blob: Blob
-  objectUrl: string
-}
 
 type CapturePhase = 'idle' | 'countdown' | 'capturing' | 'pause' | 'complete'
 
@@ -34,9 +34,15 @@ interface CameraViewProps {
   onReviewOpen?: () => void
   onEditorOpen?: () => void
   onBackToCamera?: () => void
+  onPhotosReady?: (photos: CapturedPhoto[], publicationId: string) => void
 }
 
-export function CameraView({ onReviewOpen, onEditorOpen, onBackToCamera }: CameraViewProps = {}) {
+export function CameraView({
+  onReviewOpen,
+  onEditorOpen,
+  onBackToCamera,
+  onPhotosReady,
+}: CameraViewProps = {}) {
   const { status, error, videoRef, streamRef, startCamera, stopCamera } = useCamera()
   const { setPhotos: setContextPhotos, photos: contextPhotos, clearPhotos: clearContextPhotos } = usePhotoStrip()
   const [photos, setPhotos] = useState<CapturedPhoto[]>([])
@@ -55,6 +61,7 @@ export function CameraView({ onReviewOpen, onEditorOpen, onBackToCamera }: Camer
   const pendingWaitResolveRef = useRef<(() => void) | null>(null)
   const retakeButtonRefs = useRef<Array<HTMLButtonElement | null>>([])
   const focusAfterRetakeRef = useRef<number | null>(null)
+  const capturePublicationIdRef = useRef<string | null>(null)
 
   // Debug logging for render cycles
   console.log('[CameraView] Render - status:', status, 'photos:', photos.length, 'phase:', capturePhase)
@@ -152,6 +159,7 @@ export function CameraView({ onReviewOpen, onEditorOpen, onBackToCamera }: Camer
     if (capturePhase !== 'idle') return
 
     const runId = ++captureRunRef.current
+    capturePublicationIdRef.current = crypto.randomUUID()
     console.log('[Camera] Starting 4-photo capture sequence')
     setCaptureError(null)
     photos.forEach((photo) => URL.revokeObjectURL(photo.objectUrl))
@@ -252,6 +260,7 @@ export function CameraView({ onReviewOpen, onEditorOpen, onBackToCamera }: Camer
       const updatedPhotos = [...contextPhotos]
       updatedPhotos[index] = replacement
       setContextPhotos(updatedPhotos)
+      onPhotosReady?.(updatedPhotos, crypto.randomUUID())
       URL.revokeObjectURL(original.objectUrl)
       replacement = null
 
@@ -271,7 +280,7 @@ export function CameraView({ onReviewOpen, onEditorOpen, onBackToCamera }: Camer
       )
       setCapturePhase('idle')
     }
-  }, [capturePhase, captureSinglePhoto, contextPhotos, retakeIndex, setContextPhotos, stopCamera, wait])
+  }, [capturePhase, captureSinglePhoto, contextPhotos, onPhotosReady, retakeIndex, setContextPhotos, stopCamera, wait])
 
   /**
    * Retake all photos: discard all and restart camera
@@ -344,9 +353,12 @@ export function CameraView({ onReviewOpen, onEditorOpen, onBackToCamera }: Camer
       // Transfer photos to context before transitioning to review mode
       // so the review-mode instance can display them from context
       setContextPhotos(photos)
+      const publicationId = capturePublicationIdRef.current ?? crypto.randomUUID()
+      capturePublicationIdRef.current = publicationId
+      onPhotosReady?.(photos, publicationId)
       onReviewOpen()
     }
-  }, [capturePhase, photos.length, onReviewOpen, photos, setContextPhotos])
+  }, [capturePhase, photos.length, onPhotosReady, onReviewOpen, photos, setContextPhotos])
 
   // Review screen: show 4 photos from either local capture or context (from editor return)
   // Only render this if we're in review mode (onReviewOpen not provided) or transitioning

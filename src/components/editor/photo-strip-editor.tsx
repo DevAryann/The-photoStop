@@ -25,7 +25,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
  *
  * Photos stay in React context during the session.
  * Object URLs remain valid while component is mounted.
- * All processing is client-side; no photos are uploaded or shared externally.
+ * Editing and rendering stay client-side. Room sharing persists only source photos;
+ * filters, stickers, backgrounds, captions, previews, and exports remain local.
  */
 
 interface BackgroundOption {

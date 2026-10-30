@@ -9,6 +9,7 @@ import {
   type RoomPresenceParticipant,
 } from '@/lib/room-presence'
 import type { RealtimeChannel } from '@supabase/supabase-js'
+import { isPhotoSetId } from '@/lib/shared-photos'
 
 export type RoomPresenceStatus =
   | 'connecting'
@@ -34,7 +35,7 @@ interface PresencePayload {
  * - Channel name contains room code (already public/shareable)
  * - Anyone who knows the room code can subscribe to the broadcast channel
  * - Realtime payloads contain only safe state and participant labels
- * - No capability tokens, capability hashes, or internal UUIDs exposed
+ * - No capability tokens, capability hashes, room UUIDs, or participant UUIDs exposed
  * - Room page validates capability server-side before showing content
  * - Subscribing to broadcast does not grant access to room content
  *
@@ -52,18 +53,18 @@ export function useRoomRealtime(
   const [presenceStatus, setPresenceStatus] =
     useState<RoomPresenceStatus>('connecting')
   const [retryCount, setRetryCount] = useState(0)
+  const [photoSetSignal, setPhotoSetSignal] = useState<string | null>(null)
+  const [subscriptionVersion, setSubscriptionVersion] = useState(0)
 
   const retryPresence = useCallback(() => {
+    setParticipants([])
+    setPresenceStatus('connecting')
     setRetryCount((current) => current + 1)
   }, [])
 
   useEffect(() => {
     let isCurrentSubscription = true
     const supabase = createClient()
-
-    setRoomState(initialState)
-    setParticipants([])
-    setPresenceStatus('connecting')
 
     const syncParticipants = (channel: RealtimeChannel) => {
       const state = channel.presenceState<PresencePayload>()
@@ -114,6 +115,16 @@ export function useRoomRealtime(
           }
         }
       )
+      .on(
+        'broadcast',
+        { event: 'photo_set_ready' },
+        (message: { payload?: { photoSetId?: unknown } }) => {
+          const photoSetId = message.payload?.photoSetId
+          if (isCurrentSubscription && isPhotoSetId(photoSetId)) {
+            setPhotoSetSignal(photoSetId)
+          }
+        }
+      )
       .on('presence', { event: 'sync' }, () => syncParticipants(channel))
       .subscribe((status) => {
         if (!isCurrentSubscription) {
@@ -121,6 +132,7 @@ export function useRoomRealtime(
         }
 
         if (status === 'SUBSCRIBED') {
+          setSubscriptionVersion((current) => current + 1)
           void channel
             .track({
               participantKey: participant.key,
@@ -162,5 +174,7 @@ export function useRoomRealtime(
     participants,
     presenceStatus,
     retryPresence,
+    photoSetSignal,
+    subscriptionVersion,
   }
 }

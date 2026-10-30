@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useState, useCallback, ReactNode } from 'react'
 
-interface CapturedPhoto {
+export interface CapturedPhoto {
   blob: Blob
   objectUrl: string
 }
@@ -21,6 +21,7 @@ export interface PhotoStripSticker {
 interface PhotoStripContextType {
   photos: CapturedPhoto[]
   setPhotos: (photos: CapturedPhoto[]) => void
+  replacePhotos: (photos: CapturedPhoto[], resetEdits?: boolean) => void
   clearPhotos: () => void
   backgroundColor: string
   setBackgroundColor: (color: string) => void
@@ -65,24 +66,40 @@ export function PhotoStripProvider({ children }: { children: ReactNode }) {
     setCaptionValue(value.slice(0, CAPTION_MAX_LENGTH))
   }, [])
 
-  const clearPhotos = useCallback(() => {
-    // Revoke all object URLs to free memory
-    photos.forEach((photo) => {
-      URL.revokeObjectURL(photo.objectUrl)
-    })
-    setPhotos([])
+  const resetEdits = useCallback(() => {
     setBackgroundColor('#ffffff')
     setStripStyle('plain')
     setPhotoFilter('original')
     setStickers([])
     setCaptionValue('')
-  }, [photos])
+  }, [])
+
+  const replacePhotos = useCallback((nextPhotos: CapturedPhoto[], shouldResetEdits = false) => {
+    setPhotos((currentPhotos) => {
+      const retainedUrls = new Set(nextPhotos.map((photo) => photo.objectUrl))
+      currentPhotos.forEach((photo) => {
+        if (!retainedUrls.has(photo.objectUrl)) URL.revokeObjectURL(photo.objectUrl)
+      })
+      return nextPhotos
+    })
+
+    if (shouldResetEdits) resetEdits()
+  }, [resetEdits])
+
+  const clearPhotos = useCallback(() => {
+    setPhotos((currentPhotos) => {
+      currentPhotos.forEach((photo) => URL.revokeObjectURL(photo.objectUrl))
+      return []
+    })
+    resetEdits()
+  }, [resetEdits])
 
   return (
     <PhotoStripContext.Provider
       value={{
         photos,
         setPhotos,
+        replacePhotos,
         clearPhotos,
         backgroundColor,
         setBackgroundColor,

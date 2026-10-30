@@ -1,12 +1,18 @@
 'use client'
 
 import Link from 'next/link'
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { useRoomRealtime } from '@/hooks/use-room-realtime'
+import { useSharedRoomPhotos } from '@/hooks/use-shared-room-photos'
 import { CameraView } from '@/components/camera/camera-view'
 import { PhotoStripEditor } from '@/components/editor/photo-strip-editor'
-import { PhotoStripProvider } from '@/context/photo-strip-context'
+import {
+  PhotoStripProvider,
+  usePhotoStrip,
+  type CapturedPhoto,
+} from '@/context/photo-strip-context'
 import type { RoomPresenceIdentity } from '@/lib/room-presence'
+import { SharedPhotoStrip } from '@/components/room/shared-photo-strip'
 
 interface RoomClientProps {
   code: string
@@ -29,26 +35,88 @@ interface RoomClientProps {
  * - Capability validation happens server-side (parent Server Component)
  * - This component only handles UI updates based on broadcast events
  * - Broadcast channel is public (anyone with room code can subscribe)
- * - Broadcast contains no sensitive data (only state: 'active')
+ * - Broadcast contains no photo bytes or credentials, only state/invalidation IDs
  * - Room content access still requires valid capability cookie
  */
 export function RoomClient({ code, initialState, participant }: RoomClientProps) {
+  return (
+    <PhotoStripProvider>
+      <RoomSession code={code} initialState={initialState} participant={participant} />
+    </PhotoStripProvider>
+  )
+}
+
+function RoomSession({ code, initialState, participant }: RoomClientProps) {
   const {
     roomState,
     participants,
     presenceStatus,
     retryPresence,
+    photoSetSignal,
+    subscriptionVersion,
   } = useRoomRealtime(code, initialState, participant)
+  const {
+    latestPhotoSet,
+    loadStatus,
+    loadError,
+    publicationStatus,
+    publicationError,
+    publishPhotos,
+    retryPublication,
+    retryLoad,
+  } = useSharedRoomPhotos(code, photoSetSignal, subscriptionVersion)
+  const { photos: contextPhotos, replacePhotos } = usePhotoStrip()
   const isWaiting = roomState === 'waiting'
   const isActive = roomState === 'active'
   const onlineCount = participants.length
 
   // Local state for view mode: 'camera' (idle/capturing), 'review' (4 photos), 'editor'
   const [viewMode, setViewMode] = useState<'camera' | 'review' | 'editor'>('camera')
+  const [appliedPhotoSetId, setAppliedPhotoSetId] = useState<string | null>(null)
+
+  const handlePhotosReady = useCallback(
+    (photos: CapturedPhoto[], publicationId: string) => {
+      void publishPhotos(photos, publicationId).then((photoSetId) => {
+        if (photoSetId) setAppliedPhotoSetId(photoSetId)
+      })
+    },
+    [publishPhotos]
+  )
+
+  const handleRetryPublication = useCallback(() => {
+    void retryPublication().then((photoSetId) => {
+      if (photoSetId) setAppliedPhotoSetId(photoSetId)
+    })
+  }, [retryPublication])
+
+  const handleOpenSharedStrip = useCallback(() => {
+    if (!latestPhotoSet) return
+
+    if (
+      contextPhotos.length === 4 &&
+      !window.confirm(
+        'Open the shared strip? This replaces the photos and edits currently open on this device.'
+      )
+    ) {
+      return
+    }
+
+    const localCopies = latestPhotoSet.photos.map((photo) => ({
+      blob: photo.blob,
+      objectUrl: URL.createObjectURL(photo.blob),
+    }))
+    replacePhotos(localCopies, true)
+    setAppliedPhotoSetId(latestPhotoSet.id)
+    setViewMode('review')
+  }, [contextPhotos.length, latestPhotoSet, replacePhotos])
+
+  const handleBackToCamera = useCallback(() => {
+    setAppliedPhotoSetId(null)
+    setViewMode('camera')
+  }, [])
 
   return (
-    <PhotoStripProvider>
-      <>
+    <>
         {/* Room Status - Only show when camera view is active */}
         {viewMode === 'camera' && (
           <div className="flex flex-col items-center gap-4 text-center">
@@ -179,10 +247,23 @@ export function RoomClient({ code, initialState, participant }: RoomClientProps)
           )}
         </section>
 
+        <SharedPhotoStrip
+          latestPhotoSet={latestPhotoSet}
+          isApplied={latestPhotoSet?.id === appliedPhotoSetId}
+          hasCurrentPhotos={contextPhotos.length === 4}
+          loadStatus={loadStatus}
+          loadError={loadError}
+          publicationStatus={publicationStatus}
+          publicationError={publicationError}
+          onOpen={handleOpenSharedStrip}
+          onRetryLoad={() => void retryLoad()}
+          onRetryPublication={handleRetryPublication}
+        />
+
         {/* Room Code Display - Only show when camera view is active */}
         {viewMode === 'camera' && (
           <div className="w-full flex flex-col items-center gap-3 p-6 rounded-lg bg-[var(--surface)] border border-[var(--border)]">
-            <span className="text-xs uppercase tracking-wider text-[var(--text-tertiary)} font-medium">
+            <span className="text-xs uppercase tracking-wider text-[var(--text-tertiary)] font-medium">
               Room Code
             </span>
             <div className="text-4xl font-bold tracking-wider font-mono">
@@ -199,7 +280,10 @@ export function RoomClient({ code, initialState, participant }: RoomClientProps)
         {/* Camera View - Only shown when room is active and in camera mode */}
         {isActive && viewMode === 'camera' && (
           <div className="w-full">
-            <CameraView onReviewOpen={() => setViewMode('review')} />
+            <CameraView
+              onReviewOpen={() => setViewMode('review')}
+              onPhotosReady={handlePhotosReady}
+            />
           </div>
         )}
 
@@ -208,7 +292,8 @@ export function RoomClient({ code, initialState, participant }: RoomClientProps)
           <div className="w-full">
             <CameraView
               onEditorOpen={() => setViewMode('editor')}
-              onBackToCamera={() => setViewMode('camera')}
+              onBackToCamera={handleBackToCamera}
+              onPhotosReady={handlePhotosReady}
             />
           </div>
         )}
@@ -243,7 +328,6 @@ export function RoomClient({ code, initialState, participant }: RoomClientProps)
             ← Back to home
           </Link>
         )}
-      </>
-    </PhotoStripProvider>
+    </>
   )
 }
