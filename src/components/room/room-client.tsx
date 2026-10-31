@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRoomRealtime } from '@/hooks/use-room-realtime'
 import { useSharedRoomPhotos } from '@/hooks/use-shared-room-photos'
 import { CameraView } from '@/components/camera/camera-view'
@@ -11,13 +11,21 @@ import {
   usePhotoStrip,
   type CapturedPhoto,
 } from '@/context/photo-strip-context'
-import type { RoomActivity, RoomPresenceIdentity } from '@/lib/room-presence'
+import type {
+  RoomActivity,
+  RoomPresenceIdentity,
+  RoomPresenceKey,
+  RoomState,
+} from '@/lib/room-presence'
+import { getParticipantDisplayName } from '@/lib/room-presence'
 import { SharedPhotoStrip } from '@/components/room/shared-photo-strip'
 
 interface RoomClientProps {
   code: string
-  initialState: 'waiting' | 'active'
+  initialState: RoomState
   participant: RoomPresenceIdentity
+  hostKey: RoomPresenceKey
+  isHost: boolean
 }
 
 const ACTIVITY_DETAILS: Record<
@@ -64,15 +72,33 @@ const ACTIVITY_DETAILS: Record<
  * - Broadcast contains no photo bytes or credentials, only state/invalidation IDs
  * - Room content access still requires valid capability cookie
  */
-export function RoomClient({ code, initialState, participant }: RoomClientProps) {
+export function RoomClient({
+  code,
+  initialState,
+  participant,
+  hostKey,
+  isHost,
+}: RoomClientProps) {
   return (
     <PhotoStripProvider>
-      <RoomSession code={code} initialState={initialState} participant={participant} />
+      <RoomSession
+        code={code}
+        initialState={initialState}
+        participant={participant}
+        hostKey={hostKey}
+        isHost={isHost}
+      />
     </PhotoStripProvider>
   )
 }
 
-function RoomSession({ code, initialState, participant }: RoomClientProps) {
+function RoomSession({
+  code,
+  initialState,
+  participant,
+  hostKey,
+  isHost,
+}: RoomClientProps) {
   const {
     roomState,
     participants,
@@ -81,7 +107,9 @@ function RoomSession({ code, initialState, participant }: RoomClientProps) {
     setActivity,
     photoSetSignal,
     subscriptionVersion,
-  } = useRoomRealtime(code, initialState, participant)
+    markRoomEnded,
+  } = useRoomRealtime(code, initialState, participant, hostKey)
+  const isEnded = roomState === 'ended'
   const {
     latestPhotoSet,
     loadStatus,
@@ -91,8 +119,8 @@ function RoomSession({ code, initialState, participant }: RoomClientProps) {
     publishPhotos,
     retryPublication,
     retryLoad,
-  } = useSharedRoomPhotos(code, photoSetSignal, subscriptionVersion)
-  const { photos: contextPhotos, replacePhotos } = usePhotoStrip()
+  } = useSharedRoomPhotos(code, photoSetSignal, subscriptionVersion, isEnded)
+  const { photos: contextPhotos, replacePhotos, clearPhotos } = usePhotoStrip()
   const isWaiting = roomState === 'waiting'
   const isActive = roomState === 'active'
   const onlineCount = participants.length
@@ -101,6 +129,10 @@ function RoomSession({ code, initialState, participant }: RoomClientProps) {
   const [viewMode, setViewMode] = useState<'camera' | 'review' | 'editor'>('camera')
   const [isCapturing, setIsCapturing] = useState(false)
   const [appliedPhotoSetId, setAppliedPhotoSetId] = useState<string | null>(null)
+  const [isEndDialogOpen, setIsEndDialogOpen] = useState(false)
+  const [isEndingRoom, setIsEndingRoom] = useState(false)
+  const [endRoomError, setEndRoomError] = useState<string | null>(null)
+  const endDialogRef = useRef<HTMLDialogElement>(null)
 
   const activity: RoomActivity =
     publicationStatus === 'uploading'
@@ -116,6 +148,53 @@ function RoomSession({ code, initialState, participant }: RoomClientProps) {
   useEffect(() => {
     setActivity(activity)
   }, [activity, setActivity])
+
+  useEffect(() => {
+    if (!isEnded) return
+    clearPhotos()
+  }, [clearPhotos, isEnded])
+
+  useEffect(() => {
+    if (!isEndDialogOpen) return
+    const dialog = endDialogRef.current
+    if (dialog && !dialog.open) dialog.showModal()
+    return () => {
+      if (dialog?.open) dialog.close()
+    }
+  }, [isEndDialogOpen])
+
+  const handleEndRoom = useCallback(async () => {
+    if (!isHost || isEndingRoom) return
+
+    setIsEndingRoom(true)
+    setEndRoomError(null)
+    try {
+      const response = await fetch(
+        `/api/rooms/${encodeURIComponent(code)}/end`,
+        { method: 'POST' }
+      )
+      const body = await response.json().catch(() => null) as
+        | { state?: unknown; error?: string }
+        | null
+
+      if (!response.ok || body?.state !== 'ended') {
+        throw new Error(
+          body?.error ?? 'The room could not be ended. Please try again.'
+        )
+      }
+
+      markRoomEnded()
+      setIsEndDialogOpen(false)
+    } catch (error) {
+      setEndRoomError(
+        error instanceof Error
+          ? error.message
+          : 'The room could not be ended. Please try again.'
+      )
+    } finally {
+      setIsEndingRoom(false)
+    }
+  }, [code, isEndingRoom, isHost, markRoomEnded])
 
   const handlePhotosReady = useCallback(
     (photos: CapturedPhoto[], publicationId: string) => {
@@ -157,6 +236,64 @@ function RoomSession({ code, initialState, participant }: RoomClientProps) {
     setAppliedPhotoSetId(null)
     setViewMode('camera')
   }, [])
+
+  const knownParticipantKeys: RoomPresenceKey[] = isActive
+    ? ['participant-1', 'participant-2']
+    : [participant.key]
+  const roomParticipants = knownParticipantKeys.map((key) => {
+    const onlineParticipant = participants.find((candidate) => candidate.key === key)
+    return {
+      key,
+      displayName: getParticipantDisplayName(key),
+      isCurrentUser: key === participant.key,
+      isHost: key === hostKey,
+      isOnline: Boolean(onlineParticipant),
+      activity: onlineParticipant?.activity ?? ('idle' as RoomActivity),
+    }
+  })
+
+  if (isEnded) {
+    return (
+      <section
+        className="flex w-full flex-col items-center gap-8 py-6 text-center"
+        aria-labelledby="room-ended-title"
+        aria-live="assertive"
+      >
+        <div className="flex size-16 items-center justify-center rounded-full border border-[var(--border-active)] bg-[var(--surface)] text-[var(--secondary)]">
+          <svg
+            width="30"
+            height="30"
+            viewBox="0 0 30 30"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path
+              d="M8 8L22 22M22 8L8 22"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+            />
+          </svg>
+        </div>
+        <div className="flex max-w-sm flex-col gap-3">
+          <h1 id="room-ended-title" className="text-2xl font-bold text-[var(--text-primary)]">
+            Room ended
+          </h1>
+          <p className="leading-relaxed text-[var(--text-secondary)]">
+            {isHost
+              ? 'You ended this photobooth session. Photos can no longer be captured, shared, retaken, or edited.'
+              : 'The host ended this photobooth session. Photos can no longer be captured, shared, retaken, or edited.'}
+          </p>
+        </div>
+        <Link
+          href="/"
+          className="min-h-11 rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] px-6 py-3 font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
+        >
+          Create a new room
+        </Link>
+      </section>
+    )
+  }
 
   return (
     <>
@@ -239,25 +376,24 @@ function RoomSession({ code, initialState, participant }: RoomClientProps) {
             </span>
           </div>
 
-          {participants.length > 0 && (
-            <ul
-              className="flex flex-wrap gap-2"
-              aria-label="Online participants and their current activity"
-              aria-live="polite"
-            >
-              {participants.map((onlineParticipant) => {
+          <ul
+            className="flex flex-wrap gap-2"
+            aria-label="Room participants and their current activity"
+            aria-live="polite"
+          >
+              {roomParticipants.map((onlineParticipant) => {
                 const activityDetails = ACTIVITY_DETAILS[onlineParticipant.activity]
 
                 return (
                   <li
                     key={onlineParticipant.key}
-                    aria-label={`${onlineParticipant.displayName}${onlineParticipant.isCurrentUser ? ', you' : ''}: online, ${activityDetails.label}`}
+                    aria-label={`${onlineParticipant.displayName}${onlineParticipant.isHost ? ', host' : ''}${onlineParticipant.isCurrentUser ? ', you' : ''}: ${onlineParticipant.isOnline ? `online, ${activityDetails.label}` : 'offline'}`}
                     className="flex max-w-full min-w-0 items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--surface)] py-1.5 pr-3 pl-1.5"
                   >
                     <span className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--canvas)] text-xs font-semibold text-[var(--text-primary)]">
                       {onlineParticipant.key === 'participant-1' ? '1' : '2'}
                       <span
-                        className="absolute right-0 bottom-0 h-2.5 w-2.5 rounded-full border-2 border-[var(--surface)] bg-[var(--success)]"
+                        className={`absolute right-0 bottom-0 h-2.5 w-2.5 rounded-full border-2 border-[var(--surface)] ${onlineParticipant.isOnline ? 'bg-[var(--success)]' : 'bg-[var(--text-tertiary)]'}`}
                         aria-hidden="true"
                       />
                     </span>
@@ -268,21 +404,31 @@ function RoomSession({ code, initialState, participant }: RoomClientProps) {
                           <span className="text-[var(--text-secondary)]"> (You)</span>
                         )}
                       </span>
+                      {onlineParticipant.isHost && (
+                        <span className="shrink-0 rounded-full border border-[var(--warning)]/40 bg-[var(--warning)]/10 px-2 py-0.5 text-[0.6875rem] font-semibold text-[var(--warning)]">
+                          Host
+                        </span>
+                      )}
                       <span
                         className="flex shrink-0 items-center gap-1 text-xs text-[var(--text-secondary)]"
                         aria-hidden="true"
                       >
-                        <span
-                          className={`h-1.5 w-1.5 rounded-full ${activityDetails.indicatorClassName}`}
-                        />
-                        {activityDetails.label}
+                        {onlineParticipant.isOnline ? (
+                          <>
+                            <span
+                              className={`h-1.5 w-1.5 rounded-full ${activityDetails.indicatorClassName}`}
+                            />
+                            {activityDetails.label}
+                          </>
+                        ) : (
+                          'Offline'
+                        )}
                       </span>
                     </span>
                   </li>
                 )
               })}
             </ul>
-          )}
 
           {presenceStatus === 'connected' && participants.length === 0 && (
             <p className="text-sm text-[var(--text-secondary)]" aria-live="polite">
@@ -304,6 +450,24 @@ function RoomSession({ code, initialState, participant }: RoomClientProps) {
                 className="min-h-11 rounded-md border border-[var(--border-active)] px-4 text-sm font-semibold text-[var(--text-primary)] transition-colors hover:border-[var(--primary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
               >
                 Retry
+              </button>
+            </div>
+          )}
+
+          {isHost && (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--border)] pt-3">
+              <p className="min-w-0 flex-1 text-sm text-[var(--text-secondary)]">
+                You created this room and can end it for everyone.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setEndRoomError(null)
+                  setIsEndDialogOpen(true)
+                }}
+                className="min-h-11 rounded-lg border border-[var(--error)]/50 px-4 py-2 text-sm font-semibold text-[var(--error)] transition-colors hover:bg-[var(--error)]/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--error)]"
+              >
+                End Room
               </button>
             </div>
           )}
@@ -391,6 +555,70 @@ function RoomSession({ code, initialState, participant }: RoomClientProps) {
           >
             ← Back to home
           </Link>
+        )}
+
+        {isEndDialogOpen && (
+          <dialog
+            ref={endDialogRef}
+            aria-labelledby="end-room-title"
+            aria-describedby="end-room-description"
+            onCancel={(event) => {
+              event.preventDefault()
+              if (!isEndingRoom) setIsEndDialogOpen(false)
+            }}
+            onClick={(event) => {
+              if (event.target === event.currentTarget && !isEndingRoom) {
+                setIsEndDialogOpen(false)
+              }
+            }}
+            className="m-auto w-[min(28rem,calc(100vw-2rem))] rounded-xl border border-[var(--border-active)] bg-[var(--surface)] p-0 text-[var(--text-primary)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] backdrop:bg-black/80 backdrop:backdrop-blur-sm"
+          >
+            <div className="flex flex-col gap-6 p-6" aria-busy={isEndingRoom}>
+              <div className="flex items-start gap-4">
+                <div className="flex size-11 shrink-0 items-center justify-center rounded-full bg-[var(--error)]/10 text-[var(--error)]">
+                  <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true">
+                    <path d="M6 6L16 16M16 6L6 16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                  </svg>
+                </div>
+                <div className="min-w-0">
+                  <h2 id="end-room-title" className="text-xl font-semibold">
+                    End this room?
+                  </h2>
+                  <p id="end-room-description" className="mt-2 text-sm leading-relaxed text-[var(--text-secondary)]">
+                    This ends the session for everyone. No one will be able to capture, upload, retake, or edit photos in this room.
+                  </p>
+                </div>
+              </div>
+
+              {endRoomError && (
+                <p
+                  className="rounded-lg border border-[var(--error)]/40 bg-[var(--error)]/10 px-4 py-3 text-sm leading-relaxed text-[var(--text-primary)]"
+                  role="alert"
+                >
+                  {endRoomError}
+                </p>
+              )}
+
+              <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => setIsEndDialogOpen(false)}
+                  disabled={isEndingRoom}
+                  className="min-h-11 rounded-lg border border-[var(--border-active)] px-5 py-2.5 font-semibold text-[var(--text-primary)] transition-colors hover:bg-[var(--canvas)] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
+                >
+                  Keep Room Open
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleEndRoom()}
+                  disabled={isEndingRoom}
+                  className="min-h-11 rounded-lg bg-[var(--error)] px-5 py-2.5 font-semibold text-[#210406] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--error)]"
+                >
+                  {isEndingRoom ? 'Ending Room…' : 'End Room for Everyone'}
+                </button>
+              </div>
+            </div>
+          </dialog>
         )}
     </>
   )

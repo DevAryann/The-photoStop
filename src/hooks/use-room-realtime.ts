@@ -8,7 +8,9 @@ import {
   isRoomPresenceKey,
   type RoomActivity,
   type RoomPresenceIdentity,
+  type RoomPresenceKey,
   type RoomPresenceParticipant,
+  type RoomState,
 } from '@/lib/room-presence'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import { isPhotoSetId } from '@/lib/shared-photos'
@@ -64,10 +66,11 @@ function getActivityUpdatedAt(value: unknown) {
  */
 export function useRoomRealtime(
   roomCode: string,
-  initialState: 'waiting' | 'active',
-  participant: RoomPresenceIdentity
+  initialState: RoomState,
+  participant: RoomPresenceIdentity,
+  hostKey: RoomPresenceKey
 ) {
-  const [roomState, setRoomState] = useState<'waiting' | 'active'>(initialState)
+  const [roomState, setRoomState] = useState<RoomState>(initialState)
   const [participants, setParticipants] = useState<RoomPresenceParticipant[]>([])
   const [presenceStatus, setPresenceStatus] =
     useState<RoomPresenceStatus>('connecting')
@@ -76,6 +79,38 @@ export function useRoomRealtime(
   const [subscriptionVersion, setSubscriptionVersion] = useState(0)
   const activityRef = useRef<RoomActivity>('idle')
   const requestActivityTrackRef = useRef<(() => void) | null>(null)
+  const stateRefreshAbortRef = useRef<AbortController | null>(null)
+
+  const refreshRoomState = useCallback(async () => {
+    stateRefreshAbortRef.current?.abort()
+    const controller = new AbortController()
+    stateRefreshAbortRef.current = controller
+
+    try {
+      const response = await fetch(`/api/rooms/${encodeURIComponent(roomCode)}`, {
+        cache: 'no-store',
+        signal: controller.signal,
+      })
+      if (!response.ok) return
+
+      const body = await response.json() as { state?: unknown }
+      if (
+        body.state === 'waiting' ||
+        body.state === 'active' ||
+        body.state === 'ended'
+      ) {
+        setRoomState(body.state)
+      }
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) {
+        console.error('[Room State] Authoritative refresh failed:', error)
+      }
+    }
+  }, [roomCode])
+
+  const markRoomEnded = useCallback(() => {
+    setRoomState('ended')
+  }, [])
 
   const retryPresence = useCallback(() => {
     setParticipants([])
@@ -132,6 +167,7 @@ export function useRoomRealtime(
             key,
             displayName,
             isCurrentUser: key === participant.key,
+            isHost: key === hostKey,
             activity: isRoomActivity(latestPresence.activity)
               ? latestPresence.activity
               : 'idle',
@@ -158,8 +194,13 @@ export function useRoomRealtime(
         (message: { payload?: { state?: unknown } }) => {
           const newState = message.payload?.state
 
-          if (isCurrentSubscription && newState === 'active') {
-            setRoomState('active')
+          if (
+            isCurrentSubscription &&
+            (newState === 'active' || newState === 'ended')
+          ) {
+            // Public Realtime messages are only invalidation signals. Verify the
+            // transition against the capability-protected server state.
+            void refreshRoomState()
           }
         }
       )
@@ -184,6 +225,7 @@ export function useRoomRealtime(
           canTrack = true
           lastTrackedActivity = null
           requestActivityTrackRef.current?.()
+          void refreshRoomState()
           return
         }
 
@@ -258,7 +300,28 @@ export function useRoomRealtime(
       }
       void supabase.removeChannel(channel)
     }
-  }, [roomCode, initialState, participant.displayName, participant.key, retryCount])
+  }, [hostKey, participant.displayName, participant.key, refreshRoomState, retryCount, roomCode])
+
+  useEffect(() => {
+    const refreshIfVisible = () => {
+      if (document.visibilityState === 'visible') void refreshRoomState()
+    }
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refreshRoomState()
+    }, 15_000)
+
+    window.addEventListener('focus', refreshIfVisible)
+    window.addEventListener('online', refreshIfVisible)
+    document.addEventListener('visibilitychange', refreshIfVisible)
+
+    return () => {
+      window.clearInterval(intervalId)
+      window.removeEventListener('focus', refreshIfVisible)
+      window.removeEventListener('online', refreshIfVisible)
+      document.removeEventListener('visibilitychange', refreshIfVisible)
+      stateRefreshAbortRef.current?.abort()
+    }
+  }, [refreshRoomState])
 
   return {
     roomState,
@@ -268,5 +331,6 @@ export function useRoomRealtime(
     setActivity,
     photoSetSignal,
     subscriptionVersion,
+    markRoomEnded,
   }
 }

@@ -1,5 +1,7 @@
 export type RoomPresenceKey = 'participant-1' | 'participant-2'
 
+export type RoomState = 'waiting' | 'active' | 'ended'
+
 export type RoomActivity =
   | 'idle'
   | 'capturing'
@@ -14,6 +16,7 @@ export interface RoomPresenceIdentity {
 
 export interface RoomPresenceParticipant extends RoomPresenceIdentity {
   isCurrentUser: boolean
+  isHost: boolean
   activity: RoomActivity
 }
 

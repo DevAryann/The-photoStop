@@ -55,7 +55,8 @@ async function readJsonResponse<T>(response: Response): Promise<T> {
 export function useSharedRoomPhotos(
   roomCode: string,
   photoSetSignal: string | null,
-  subscriptionVersion: number
+  subscriptionVersion: number,
+  roomEnded: boolean
 ) {
   const [latestPhotoSet, setLatestPhotoSet] = useState<SharedRoomPhotoSet | null>(null)
   const [loadStatus, setLoadStatus] = useState<LoadStatus>('loading')
@@ -71,6 +72,11 @@ export function useSharedRoomPhotos(
   const publicationQueueRef = useRef<Promise<void>>(Promise.resolve())
   const completedPublicationIdsRef = useRef(new Set<string>())
   const mountedRef = useRef(true)
+  const roomEndedRef = useRef(roomEnded)
+
+  useEffect(() => {
+    roomEndedRef.current = roomEnded
+  }, [roomEnded])
 
   const replaceLatest = useCallback(
     (next: SharedRoomPhotoSet, ownsObjectUrls: boolean) => {
@@ -86,6 +92,7 @@ export function useSharedRoomPhotos(
   )
 
   const refresh = useCallback(async (preferredPhotoSetId?: string) => {
+    if (roomEndedRef.current) return
     if (
       preferredPhotoSetId &&
       latestRef.current?.id === preferredPhotoSetId
@@ -173,6 +180,7 @@ export function useSharedRoomPhotos(
 
   const performPublication = useCallback(async (publication: PendingPublication) => {
     if (completedPublicationIdsRef.current.has(publication.id)) return publication.id
+    if (roomEndedRef.current) return null
     if (mountedRef.current) {
       setPublicationStatus('uploading')
       setPublicationError(null)
@@ -197,6 +205,10 @@ export function useSharedRoomPhotos(
         reservationResponse
       )
 
+      if (roomEndedRef.current) {
+        throw new Error('This room has ended. Photos can no longer be uploaded.')
+      }
+
       if (reservation.status === 'upload') {
         if (
           !reservation.uploads ||
@@ -208,6 +220,9 @@ export function useSharedRoomPhotos(
         const supabase = createClient()
         await Promise.all(
           reservation.uploads.map(async (upload, index) => {
+            if (roomEndedRef.current) {
+              throw new Error('This room has ended. Photos can no longer be uploaded.')
+            }
             const photo = publication.photos[index]
             const { error } = await supabase.storage
               .from(SHARED_PHOTO_BUCKET)
@@ -218,6 +233,10 @@ export function useSharedRoomPhotos(
             if (error) throw error
           })
         )
+
+        if (roomEndedRef.current) {
+          throw new Error('This room has ended. Photos can no longer be published.')
+        }
 
         const completionResponse = await fetch(
           `/api/rooms/${encodeURIComponent(roomCode)}/photos`,
@@ -290,13 +309,19 @@ export function useSharedRoomPhotos(
   }, [publishPhotos])
 
   useEffect(() => {
+    if (roomEnded) {
+      loadGenerationRef.current += 1
+      loadAbortRef.current?.abort()
+      return
+    }
+
     // Defer the network-driven state transition out of the effect body. The
     // generation guard in refresh still resolves overlapping signals safely.
     const timeoutId = window.setTimeout(() => {
       void refresh(photoSetSignal ?? undefined)
     }, 0)
     return () => window.clearTimeout(timeoutId)
-  }, [photoSetSignal, refresh, subscriptionVersion])
+  }, [photoSetSignal, refresh, roomEnded, subscriptionVersion])
 
   useEffect(() => {
     return () => {

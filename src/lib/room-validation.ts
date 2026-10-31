@@ -3,8 +3,10 @@ import { hashCapability, isValidCapabilityFormat } from '@/lib/capability'
 import { isValidRoomCodeFormat } from '@/lib/room-code'
 import {
   getParticipantDisplayName,
+  isRoomPresenceKey,
   type RoomPresenceIdentity,
   type RoomPresenceKey,
+  type RoomState,
 } from '@/lib/room-presence'
 
 /**
@@ -20,16 +22,20 @@ import {
 export type RoomAccessResult =
   | {
       authorized: true
-      roomState: 'waiting' | 'active'
+      roomState: RoomState
       participant: RoomPresenceIdentity
+      hostKey: RoomPresenceKey
+      isHost: boolean
     }
   | { authorized: false }
 
 export interface AuthorizedRoomCapability {
   roomId: string
   participantId: string
-  roomState: 'waiting' | 'active'
+  roomState: RoomState
   participant: RoomPresenceIdentity
+  hostKey: RoomPresenceKey
+  isHost: boolean
 }
 
 /**
@@ -74,6 +80,8 @@ export async function validateRoomAccess(
     authorized: true,
     roomState: access.roomState,
     participant: access.participant,
+    hostKey: access.hostKey,
+    isHost: access.isHost,
   }
 }
 
@@ -108,10 +116,10 @@ export async function authorizeRoomCapability(
     // Step 1: Get the room and verify it exists, is not expired, and is active/waiting
     const { data: roomData, error: roomError } = await supabase
       .from('rooms')
-      .select('id, state, participant_count')
+      .select('id, state, host_participant_id')
       .eq('code', roomCode)
       .gt('expires_at', new Date().toISOString())
-      .in('state', ['waiting', 'active'])
+      .in('state', ['waiting', 'active', 'ended'])
       .limit(1)
       .single()
 
@@ -120,42 +128,48 @@ export async function authorizeRoomCapability(
       return null
     }
 
-    // Step 2: Verify the capability belongs to a participant in this room and
-    // derive a non-secret, room-local label from the existing join order.
-    // UUIDs and capability hashes remain server-only.
+    // Step 2: Verify the capability belongs to a participant in this room.
+    // Stable presence identities and host ownership are assigned by trusted
+    // database functions; neither is inferred from client data or timestamps.
     const { data: participantData, error: participantError } = await supabase
       .from('participants')
-      .select('id, capability_hash, joined_at')
+      .select('id, capability_hash, presence_key')
       .eq('room_id', roomData.id)
-      .order('joined_at', { ascending: true })
-      .order('id', { ascending: true })
 
     // If participant query fails or returns no data, deny access
     if (participantError || !participantData?.length) {
       return null
     }
 
-    const participantIndex = participantData.findIndex(
+    const participantRecord = participantData.find(
       (participant) => participant.capability_hash === capabilityHash
     )
+    const hostRecord = participantData.find(
+      (participant) => participant.id === roomData.host_participant_id
+    )
 
-    if (participantIndex < 0 || participantIndex > 1) {
+    if (
+      !participantRecord ||
+      !hostRecord ||
+      !isRoomPresenceKey(participantRecord.presence_key) ||
+      !isRoomPresenceKey(hostRecord.presence_key)
+    ) {
       return null
     }
 
-    const presenceKey: RoomPresenceKey =
-      participantIndex === 0 ? 'participant-1' : 'participant-2'
-
-    const participant = participantData[participantIndex]
+    const presenceKey = participantRecord.presence_key
+    const isHost = participantRecord.id === roomData.host_participant_id
 
     return {
       roomId: roomData.id,
-      participantId: participant.id,
-      roomState: roomData.state as 'waiting' | 'active',
+      participantId: participantRecord.id,
+      roomState: roomData.state as RoomState,
       participant: {
         key: presenceKey,
         displayName: getParticipantDisplayName(presenceKey),
       },
+      hostKey: hostRecord.presence_key,
+      isHost,
     }
   } catch (error) {
     // Unexpected error - log server-side, deny access

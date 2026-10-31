@@ -106,6 +106,9 @@ export async function GET(_request: Request, context: RouteContext) {
   if (!access) {
     return jsonNoStore({ error: 'Room access is unavailable' }, { status: 401 })
   }
+  if (access.roomState === 'ended') {
+    return jsonNoStore({ error: 'This room has ended' }, { status: 409 })
+  }
 
   const supabase = createAdminClient()
   const { data: photoSet, error } = await supabase
@@ -164,6 +167,9 @@ export async function POST(request: Request, context: RouteContext) {
   if (!access) {
     return jsonNoStore({ error: 'Room access is unavailable' }, { status: 401 })
   }
+  if (access.roomState === 'ended') {
+    return jsonNoStore({ error: 'This room has ended' }, { status: 409 })
+  }
 
   let body: { publicationId?: unknown; files?: unknown }
   try {
@@ -216,6 +222,9 @@ export async function POST(request: Request, context: RouteContext) {
     })
 
     if (insertError) {
+      if (insertError.message?.includes('room_ended')) {
+        return jsonNoStore({ error: 'This room has ended' }, { status: 409 })
+      }
       console.error('[Shared Photos] Reservation failed:', insertError)
       return jsonNoStore({ error: 'Photo sharing could not start' }, { status: 503 })
     }
@@ -251,6 +260,9 @@ export async function PATCH(request: Request, context: RouteContext) {
   const access = await getAuthorizedRequest(code)
   if (!access) {
     return jsonNoStore({ error: 'Room access is unavailable' }, { status: 401 })
+  }
+  if (access.roomState === 'ended') {
+    return jsonNoStore({ error: 'This room has ended' }, { status: 409 })
   }
 
   let body: { publicationId?: unknown }
@@ -312,6 +324,9 @@ export async function PATCH(request: Request, context: RouteContext) {
     .maybeSingle()
 
   if (updateError) {
+    if (updateError.message?.includes('room_ended')) {
+      return jsonNoStore({ error: 'This room has ended' }, { status: 409 })
+    }
     console.error('[Shared Photos] Completion failed:', updateError)
     return jsonNoStore({ error: 'Photos uploaded but could not be shared' }, { status: 503 })
   }
