@@ -1,10 +1,12 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import {
   getParticipantDisplayName,
+  isRoomActivity,
   isRoomPresenceKey,
+  type RoomActivity,
   type RoomPresenceIdentity,
   type RoomPresenceParticipant,
 } from '@/lib/room-presence'
@@ -20,6 +22,23 @@ export type RoomPresenceStatus =
 interface PresencePayload {
   participantKey: string
   displayName: string
+  activity?: unknown
+  activityUpdatedAt?: unknown
+}
+
+const MAX_ACTIVITY_CLOCK_SKEW_MS = 5 * 60 * 1000
+
+function getActivityUpdatedAt(value: unknown) {
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    value <= 0 ||
+    value > Date.now() + MAX_ACTIVITY_CLOCK_SKEW_MS
+  ) {
+    return 0
+  }
+
+  return value
 }
 
 /**
@@ -55,6 +74,8 @@ export function useRoomRealtime(
   const [retryCount, setRetryCount] = useState(0)
   const [photoSetSignal, setPhotoSetSignal] = useState<string | null>(null)
   const [subscriptionVersion, setSubscriptionVersion] = useState(0)
+  const activityRef = useRef<RoomActivity>('idle')
+  const requestActivityTrackRef = useRef<(() => void) | null>(null)
 
   const retryPresence = useCallback(() => {
     setParticipants([])
@@ -62,8 +83,25 @@ export function useRoomRealtime(
     setRetryCount((current) => current + 1)
   }, [])
 
+  const setActivity = useCallback((activity: RoomActivity) => {
+    if (activityRef.current === activity) return
+
+    activityRef.current = activity
+    setParticipants((current) =>
+      current.map((onlineParticipant) =>
+        onlineParticipant.isCurrentUser
+          ? { ...onlineParticipant, activity }
+          : onlineParticipant
+      )
+    )
+    requestActivityTrackRef.current?.()
+  }, [])
+
   useEffect(() => {
     let isCurrentSubscription = true
+    let canTrack = false
+    let isTracking = false
+    let lastTrackedActivity: RoomActivity | null = null
     const supabase = createClient()
 
     const syncParticipants = (channel: RealtimeChannel) => {
@@ -76,17 +114,27 @@ export function useRoomRealtime(
         }
 
         const displayName = getParticipantDisplayName(key)
-        const hasValidPresence = presences.some(
+        const validPresences = presences.filter(
           (presence) =>
             presence.participantKey === key &&
             presence.displayName === displayName
         )
 
-        if (hasValidPresence) {
+        if (validPresences.length > 0) {
+          const latestPresence = validPresences.reduce((latest, presence) =>
+            getActivityUpdatedAt(presence.activityUpdatedAt) >=
+            getActivityUpdatedAt(latest.activityUpdatedAt)
+              ? presence
+              : latest
+          )
+
           nextParticipants.push({
             key,
             displayName,
             isCurrentUser: key === participant.key,
+            activity: isRoomActivity(latestPresence.activity)
+              ? latestPresence.activity
+              : 'idle',
           })
         }
       }
@@ -133,38 +181,81 @@ export function useRoomRealtime(
 
         if (status === 'SUBSCRIBED') {
           setSubscriptionVersion((current) => current + 1)
-          void channel
-            .track({
-              participantKey: participant.key,
-              displayName: participant.displayName,
-            })
-            .then((trackStatus) => {
-              if (!isCurrentSubscription) {
-                return
-              }
-
-              setPresenceStatus(trackStatus === 'ok' ? 'connected' : 'error')
-            })
-            .catch(() => {
-              if (isCurrentSubscription) {
-                setPresenceStatus('error')
-              }
-            })
+          canTrack = true
+          lastTrackedActivity = null
+          requestActivityTrackRef.current?.()
           return
         }
 
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          canTrack = false
+          lastTrackedActivity = null
           setPresenceStatus('reconnecting')
           return
         }
 
         if (status === 'CLOSED') {
+          canTrack = false
+          lastTrackedActivity = null
           setPresenceStatus('error')
         }
       })
 
+    const trackCurrentActivity = () => {
+      if (!isCurrentSubscription || !canTrack || isTracking) return
+
+      const activity = activityRef.current
+      if (activity === lastTrackedActivity) return
+
+      isTracking = true
+      void channel
+        .track({
+          participantKey: participant.key,
+          displayName: participant.displayName,
+          activity,
+          activityUpdatedAt: Date.now(),
+        })
+        .then((trackStatus) => {
+          if (!isCurrentSubscription) return
+
+          if (trackStatus === 'ok') {
+            lastTrackedActivity = activity
+            setPresenceStatus('connected')
+          } else {
+            canTrack = false
+            lastTrackedActivity = null
+            setPresenceStatus('error')
+          }
+        })
+        .catch(() => {
+          if (isCurrentSubscription) {
+            canTrack = false
+            lastTrackedActivity = null
+            setPresenceStatus('error')
+          }
+        })
+        .finally(() => {
+          if (!isCurrentSubscription) return
+
+          isTracking = false
+          if (activityRef.current !== lastTrackedActivity) {
+            trackCurrentActivity()
+          }
+        })
+    }
+
+    requestActivityTrackRef.current = trackCurrentActivity
+
+    // The channel may subscribe synchronously in test clients, before the
+    // tracking callback above is installed.
+    trackCurrentActivity()
+
     return () => {
       isCurrentSubscription = false
+      canTrack = false
+      if (requestActivityTrackRef.current === trackCurrentActivity) {
+        requestActivityTrackRef.current = null
+      }
       void supabase.removeChannel(channel)
     }
   }, [roomCode, initialState, participant.displayName, participant.key, retryCount])
@@ -174,6 +265,7 @@ export function useRoomRealtime(
     participants,
     presenceStatus,
     retryPresence,
+    setActivity,
     photoSetSignal,
     subscriptionVersion,
   }

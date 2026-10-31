@@ -35,6 +35,7 @@ interface CameraViewProps {
   onEditorOpen?: () => void
   onBackToCamera?: () => void
   onPhotosReady?: (photos: CapturedPhoto[], publicationId: string) => void
+  onCaptureActivityChange?: (isCapturing: boolean) => void
 }
 
 export function CameraView({
@@ -42,6 +43,7 @@ export function CameraView({
   onEditorOpen,
   onBackToCamera,
   onPhotosReady,
+  onCaptureActivityChange,
 }: CameraViewProps = {}) {
   const { status, error, videoRef, streamRef, startCamera, stopCamera } = useCamera()
   const { setPhotos: setContextPhotos, photos: contextPhotos, clearPhotos: clearContextPhotos } = usePhotoStrip()
@@ -338,6 +340,16 @@ export function CameraView({
       cancelPendingWait()
     }
   }, [cancelPendingWait])
+
+  const hasActiveCapture = capturePhase !== 'idle'
+
+  useEffect(() => {
+    onCaptureActivityChange?.(hasActiveCapture)
+  }, [hasActiveCapture, onCaptureActivityChange])
+
+  useEffect(() => {
+    return () => onCaptureActivityChange?.(false)
+  }, [onCaptureActivityChange])
 
   useEffect(() => {
     if (retakeIndex !== null || focusAfterRetakeRef.current === null) return

@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useRoomRealtime } from '@/hooks/use-room-realtime'
 import { useSharedRoomPhotos } from '@/hooks/use-shared-room-photos'
 import { CameraView } from '@/components/camera/camera-view'
@@ -11,13 +11,39 @@ import {
   usePhotoStrip,
   type CapturedPhoto,
 } from '@/context/photo-strip-context'
-import type { RoomPresenceIdentity } from '@/lib/room-presence'
+import type { RoomActivity, RoomPresenceIdentity } from '@/lib/room-presence'
 import { SharedPhotoStrip } from '@/components/room/shared-photo-strip'
 
 interface RoomClientProps {
   code: string
   initialState: 'waiting' | 'active'
   participant: RoomPresenceIdentity
+}
+
+const ACTIVITY_DETAILS: Record<
+  RoomActivity,
+  { label: string; indicatorClassName: string }
+> = {
+  idle: {
+    label: 'Idle',
+    indicatorClassName: 'bg-[var(--text-secondary)]',
+  },
+  capturing: {
+    label: 'Capturing',
+    indicatorClassName: 'bg-[var(--secondary)]',
+  },
+  reviewing: {
+    label: 'Reviewing',
+    indicatorClassName: 'bg-[var(--tertiary)]',
+  },
+  editing: {
+    label: 'Editing',
+    indicatorClassName: 'bg-[var(--primary)]',
+  },
+  sharing: {
+    label: 'Sharing',
+    indicatorClassName: 'bg-[var(--success)]',
+  },
 }
 
 /**
@@ -52,6 +78,7 @@ function RoomSession({ code, initialState, participant }: RoomClientProps) {
     participants,
     presenceStatus,
     retryPresence,
+    setActivity,
     photoSetSignal,
     subscriptionVersion,
   } = useRoomRealtime(code, initialState, participant)
@@ -72,7 +99,23 @@ function RoomSession({ code, initialState, participant }: RoomClientProps) {
 
   // Local state for view mode: 'camera' (idle/capturing), 'review' (4 photos), 'editor'
   const [viewMode, setViewMode] = useState<'camera' | 'review' | 'editor'>('camera')
+  const [isCapturing, setIsCapturing] = useState(false)
   const [appliedPhotoSetId, setAppliedPhotoSetId] = useState<string | null>(null)
+
+  const activity: RoomActivity =
+    publicationStatus === 'uploading'
+      ? 'sharing'
+      : isCapturing
+        ? 'capturing'
+        : viewMode === 'review'
+          ? 'reviewing'
+          : viewMode === 'editor'
+            ? 'editing'
+            : 'idle'
+
+  useEffect(() => {
+    setActivity(activity)
+  }, [activity, setActivity])
 
   const handlePhotosReady = useCallback(
     (photos: CapturedPhoto[], publicationId: string) => {
@@ -197,28 +240,47 @@ function RoomSession({ code, initialState, participant }: RoomClientProps) {
           </div>
 
           {participants.length > 0 && (
-            <ul className="flex flex-wrap gap-2" aria-label="Online participants">
-              {participants.map((onlineParticipant) => (
-                <li
-                  key={onlineParticipant.key}
-                  className="min-w-0 flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--surface)] py-1.5 pr-3 pl-1.5"
-                >
-                  <span className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--canvas)] text-xs font-semibold text-[var(--text-primary)]">
-                    {onlineParticipant.key === 'participant-1' ? '1' : '2'}
-                    <span
-                      className="absolute right-0 bottom-0 h-2.5 w-2.5 rounded-full border-2 border-[var(--surface)] bg-[var(--success)]"
-                      aria-hidden="true"
-                    />
-                  </span>
-                  <span className="truncate text-sm text-[var(--text-primary)]">
-                    {onlineParticipant.displayName}
-                    {onlineParticipant.isCurrentUser && (
-                      <span className="text-[var(--text-secondary)]"> (You)</span>
-                    )}
-                  </span>
-                  <span className="sr-only">Online</span>
-                </li>
-              ))}
+            <ul
+              className="flex flex-wrap gap-2"
+              aria-label="Online participants and their current activity"
+              aria-live="polite"
+            >
+              {participants.map((onlineParticipant) => {
+                const activityDetails = ACTIVITY_DETAILS[onlineParticipant.activity]
+
+                return (
+                  <li
+                    key={onlineParticipant.key}
+                    aria-label={`${onlineParticipant.displayName}${onlineParticipant.isCurrentUser ? ', you' : ''}: online, ${activityDetails.label}`}
+                    className="flex max-w-full min-w-0 items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--surface)] py-1.5 pr-3 pl-1.5"
+                  >
+                    <span className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--canvas)] text-xs font-semibold text-[var(--text-primary)]">
+                      {onlineParticipant.key === 'participant-1' ? '1' : '2'}
+                      <span
+                        className="absolute right-0 bottom-0 h-2.5 w-2.5 rounded-full border-2 border-[var(--surface)] bg-[var(--success)]"
+                        aria-hidden="true"
+                      />
+                    </span>
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate text-sm text-[var(--text-primary)]">
+                        {onlineParticipant.displayName}
+                        {onlineParticipant.isCurrentUser && (
+                          <span className="text-[var(--text-secondary)]"> (You)</span>
+                        )}
+                      </span>
+                      <span
+                        className="flex shrink-0 items-center gap-1 text-xs text-[var(--text-secondary)]"
+                        aria-hidden="true"
+                      >
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full ${activityDetails.indicatorClassName}`}
+                        />
+                        {activityDetails.label}
+                      </span>
+                    </span>
+                  </li>
+                )
+              })}
             </ul>
           )}
 
@@ -283,6 +345,7 @@ function RoomSession({ code, initialState, participant }: RoomClientProps) {
             <CameraView
               onReviewOpen={() => setViewMode('review')}
               onPhotosReady={handlePhotosReady}
+              onCaptureActivityChange={setIsCapturing}
             />
           </div>
         )}
@@ -294,6 +357,7 @@ function RoomSession({ code, initialState, participant }: RoomClientProps) {
               onEditorOpen={() => setViewMode('editor')}
               onBackToCamera={handleBackToCamera}
               onPhotosReady={handlePhotosReady}
+              onCaptureActivityChange={setIsCapturing}
             />
           </div>
         )}
