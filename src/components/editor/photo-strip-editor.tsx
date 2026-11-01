@@ -25,8 +25,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
  *
  * Photos stay in React context during the session.
  * Object URLs remain valid while component is mounted.
- * Editing and rendering stay client-side. Room sharing persists only source photos;
- * filters, stickers, backgrounds, captions, previews, and exports remain local.
+ * Editing and rendering stay client-side. Draft room sharing persists source photos;
+ * finalization pins one photo set plus its render settings for read-only reuse.
  */
 
 interface BackgroundOption {
@@ -337,7 +337,25 @@ function canShareFiles(): boolean {
   }
 }
 
-export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
+interface PhotoStripEditorProps {
+  onBack: () => void
+  readOnly?: boolean
+  finalizedReady?: boolean
+  isHost?: boolean
+  canFinalize?: boolean
+  finalizeDisabledReason?: string | null
+  onRequestFinalize?: () => void
+}
+
+export function PhotoStripEditor({
+  onBack,
+  readOnly = false,
+  finalizedReady = false,
+  isHost = false,
+  canFinalize = false,
+  finalizeDisabledReason = null,
+  onRequestFinalize,
+}: PhotoStripEditorProps) {
   const {
     photos, backgroundColor, setBackgroundColor, stripStyle, setStripStyle,
     photoFilter, setPhotoFilter,
@@ -359,6 +377,7 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
   const previewGenerationRef = useRef(0)
 
   const isBusy = isExporting || isSharing || isGeneratingPreview
+  const canExport = !readOnly || finalizedReady
 
   useEffect(() => {
     if (!isPreviewOpen) return
@@ -385,6 +404,7 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
   }, [])
 
   const handleExport = async () => {
+    if (!canExport) return
     setIsExporting(true)
     setExportError(null)
     setShareMessage(null)
@@ -399,6 +419,7 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
   }
 
   const handleShare = async () => {
+    if (!canExport) return
     setIsSharing(true)
     setExportError(null)
     setShareMessage(null)
@@ -418,6 +439,7 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
   }
 
   const handlePreview = async () => {
+    if (!canExport) return
     const generation = ++previewGenerationRef.current
     setIsPreviewOpen(true)
     setIsGeneratingPreview(true)
@@ -541,9 +563,22 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
         <div className="mb-4">
           <h2 className="text-xl font-bold text-center">Photo Strip</h2>
           <p className="text-sm text-[var(--text-secondary)] text-center mt-1">
-            Customize your strip
+            {readOnly
+              ? 'Finalized for everyone — preview or download the shared result'
+              : 'Customize your strip'}
           </p>
         </div>
+
+        {readOnly && (
+          <div className="mb-4 flex w-full items-start gap-3 rounded-lg border border-[var(--success)]/40 bg-[var(--success)]/10 px-4 py-3 text-left" role="status">
+            <svg className="mt-0.5 size-5 shrink-0 text-[var(--success)]" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <path d="M5 10.5L8.25 13.75L15.25 6.75" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <p className="text-sm leading-relaxed text-[var(--text-primary)]">
+              This is the room’s finalized strip. Photos and edits are locked, so every participant exports the same result.
+            </p>
+          </div>
+        )}
 
         {/* Photo Strip Preview */}
         <div
@@ -616,6 +651,8 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
         </div>
       </div>
 
+      {!readOnly && (
+        <>
       {/* Photo Filter Options */}
       <fieldset className="w-full flex flex-col gap-3">
         <legend className="text-sm font-medium text-[var(--text-primary)] mb-3">
@@ -785,23 +822,43 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
           <span id="caption-count" className="flex-shrink-0 tabular-nums">{caption.length}/{CAPTION_MAX_LENGTH}</span>
         </div>
       </div>
+        </>
+      )}
 
       {/* Action Buttons */}
       <div className="w-full flex flex-col gap-3">
+        {!readOnly && isHost && (
+          <div className="border-y border-[var(--border)] py-4">
+            <button
+              type="button"
+              onClick={onRequestFinalize}
+              disabled={!canFinalize || !onRequestFinalize}
+              aria-describedby={finalizeDisabledReason ? 'finalize-strip-help' : undefined}
+              className="min-h-11 w-full rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] px-5 py-3 font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
+            >
+              Finalize Strip
+            </button>
+            <p id="finalize-strip-help" className="mt-2 text-sm leading-relaxed text-[var(--text-secondary)]">
+              {finalizeDisabledReason ?? 'Locks these exact photos and edits for everyone in the room.'}
+            </p>
+          </div>
+        )}
         <div className="flex flex-wrap gap-3 pt-4">
-          <button
-            onClick={onBack}
-            className="flex-1 px-4 sm:px-6 py-3 whitespace-nowrap rounded-lg border border-[var(--border-active)] text-[var(--text-primary)] hover:bg-[var(--surface)] transition-colors font-medium"
-          >
-            ← Back
-          </button>
+          {!readOnly && (
+            <button
+              onClick={onBack}
+              className="flex-1 px-4 sm:px-6 py-3 whitespace-nowrap rounded-lg border border-[var(--border-active)] text-[var(--text-primary)] hover:bg-[var(--surface)] transition-colors font-medium"
+            >
+              ← Back
+            </button>
+          )}
 
           {/* Final export preview */}
           <button
             ref={previewTriggerRef}
             type="button"
             onClick={handlePreview}
-            disabled={isBusy}
+            disabled={isBusy || !canExport}
             aria-haspopup="dialog"
             className="flex-1 px-4 sm:px-6 py-3 whitespace-nowrap rounded-lg border border-[var(--primary)] bg-[var(--primary)]/10 text-[var(--text-primary)] font-semibold hover:bg-[var(--primary)]/15 transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
           >
@@ -811,7 +868,7 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
           {/* Download PNG */}
           <button
             onClick={handleExport}
-            disabled={isBusy}
+            disabled={isBusy || !canExport}
             className="flex-1 px-4 sm:px-6 py-3 whitespace-nowrap rounded-lg bg-[var(--surface)] border border-[var(--border-active)] text-[var(--text-primary)] font-semibold hover:bg-[var(--canvas)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             aria-label="Download photo strip as PNG"
           >
@@ -822,7 +879,7 @@ export function PhotoStripEditor({ onBack }: { onBack: () => void }) {
           {fileShareSupported && (
             <button
               onClick={handleShare}
-              disabled={isBusy}
+              disabled={isBusy || !canExport}
               className="flex-1 px-4 sm:px-6 py-3 whitespace-nowrap rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] text-white font-semibold hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
               aria-label="Share photo strip"
             >

@@ -9,11 +9,17 @@ import {
   SHARED_PHOTO_BUCKET,
 } from '@/lib/shared-photos'
 import { createClient } from '@/lib/supabase/client'
+import {
+  isPhotoStripRenderConfig,
+  type PhotoStripRenderConfig,
+} from '@/lib/photo-strip-finalization'
 
 export interface SharedRoomPhotoSet {
   id: string
   createdAt: string
   isOwn: boolean
+  isFinalized: boolean
+  renderConfig: PhotoStripRenderConfig | null
   photos: CapturedPhoto[]
 }
 
@@ -30,6 +36,8 @@ interface PhotoSetApiResponse {
     id: string
     createdAt: string
     isOwn: boolean
+    isFinalized: boolean
+    renderConfig: unknown
     photos: Array<{ url: string }>
   }
 }
@@ -37,7 +45,7 @@ interface PhotoSetApiResponse {
 interface UploadReservationResponse {
   status: 'ready' | 'upload'
   photoSetId: string
-  uploads?: Array<{ path: string; token: string }>
+  uploads?: Array<{ path: string; token: string; index: number }>
 }
 
 function revokePhotos(photos: CapturedPhoto[]) {
@@ -56,7 +64,8 @@ export function useSharedRoomPhotos(
   roomCode: string,
   photoSetSignal: string | null,
   subscriptionVersion: number,
-  roomEnded: boolean
+  roomEnded: boolean,
+  finalizedPhotoSetId: string | null
 ) {
   const [latestPhotoSet, setLatestPhotoSet] = useState<SharedRoomPhotoSet | null>(null)
   const [loadStatus, setLoadStatus] = useState<LoadStatus>('loading')
@@ -73,10 +82,15 @@ export function useSharedRoomPhotos(
   const completedPublicationIdsRef = useRef(new Set<string>())
   const mountedRef = useRef(true)
   const roomEndedRef = useRef(roomEnded)
+  const finalizedPhotoSetIdRef = useRef(finalizedPhotoSetId)
 
   useEffect(() => {
     roomEndedRef.current = roomEnded
   }, [roomEnded])
+
+  useEffect(() => {
+    finalizedPhotoSetIdRef.current = finalizedPhotoSetId
+  }, [finalizedPhotoSetId])
 
   const replaceLatest = useCallback(
     (next: SharedRoomPhotoSet, ownsObjectUrls: boolean) => {
@@ -95,7 +109,8 @@ export function useSharedRoomPhotos(
     if (roomEndedRef.current) return
     if (
       preferredPhotoSetId &&
-      latestRef.current?.id === preferredPhotoSetId
+      latestRef.current?.id === preferredPhotoSetId &&
+      (!finalizedPhotoSetIdRef.current || latestRef.current.isFinalized)
     ) {
       return
     }
@@ -124,12 +139,30 @@ export function useSharedRoomPhotos(
         !isPhotoSetId(remoteSet.id) ||
         !Array.isArray(remoteSet.photos) ||
         remoteSet.photos.length !== SHARED_PHOTO_COUNT ||
-        remoteSet.photos.some((photo) => typeof photo?.url !== 'string')
+        remoteSet.photos.some((photo) => typeof photo?.url !== 'string') ||
+        typeof remoteSet.isFinalized !== 'boolean' ||
+        (remoteSet.isFinalized && !isPhotoStripRenderConfig(remoteSet.renderConfig))
       ) {
         throw new Error('The shared photo response was invalid')
       }
+      const finalizedRenderConfig =
+        remoteSet.isFinalized && isPhotoStripRenderConfig(remoteSet.renderConfig)
+          ? remoteSet.renderConfig
+          : null
 
       if (latestRef.current?.id === remoteSet.id) {
+        const current = latestRef.current
+        replaceLatest(
+          {
+            id: current.id,
+            createdAt: remoteSet.createdAt,
+            isOwn: remoteSet.isOwn,
+            isFinalized: remoteSet.isFinalized,
+            renderConfig: finalizedRenderConfig,
+            photos: current.photos,
+          },
+          current.ownsObjectUrls
+        )
         setLoadStatus('ready')
         return
       }
@@ -162,6 +195,8 @@ export function useSharedRoomPhotos(
           id: remoteSet.id,
           createdAt: remoteSet.createdAt,
           isOwn: remoteSet.isOwn,
+          isFinalized: remoteSet.isFinalized,
+          renderConfig: finalizedRenderConfig,
           photos: downloadedPhotos,
         },
         true
@@ -180,7 +215,7 @@ export function useSharedRoomPhotos(
 
   const performPublication = useCallback(async (publication: PendingPublication) => {
     if (completedPublicationIdsRef.current.has(publication.id)) return publication.id
-    if (roomEndedRef.current) return null
+    if (roomEndedRef.current || finalizedPhotoSetIdRef.current) return null
     if (mountedRef.current) {
       setPublicationStatus('uploading')
       setPublicationError(null)
@@ -208,22 +243,36 @@ export function useSharedRoomPhotos(
       if (roomEndedRef.current) {
         throw new Error('This room has ended. Photos can no longer be uploaded.')
       }
+      if (finalizedPhotoSetIdRef.current) {
+        throw new Error('This strip is finalized and can no longer be replaced.')
+      }
 
       if (reservation.status === 'upload') {
         if (
           !reservation.uploads ||
-          reservation.uploads.length !== SHARED_PHOTO_COUNT
+          reservation.uploads.length > SHARED_PHOTO_COUNT ||
+          new Set(reservation.uploads.map((upload) => upload.index)).size !==
+            reservation.uploads.length ||
+          reservation.uploads.some(
+            (upload) =>
+              !Number.isInteger(upload.index) ||
+              upload.index < 0 ||
+              upload.index >= SHARED_PHOTO_COUNT
+          )
         ) {
           throw new Error('Photo upload could not start')
         }
 
         const supabase = createClient()
         await Promise.all(
-          reservation.uploads.map(async (upload, index) => {
+          reservation.uploads.map(async (upload) => {
             if (roomEndedRef.current) {
               throw new Error('This room has ended. Photos can no longer be uploaded.')
             }
-            const photo = publication.photos[index]
+            if (finalizedPhotoSetIdRef.current) {
+              throw new Error('This strip is finalized and can no longer be replaced.')
+            }
+            const photo = publication.photos[upload.index]
             const { error } = await supabase.storage
               .from(SHARED_PHOTO_BUCKET)
               .uploadToSignedUrl(upload.path, upload.token, photo.blob, {
@@ -236,6 +285,9 @@ export function useSharedRoomPhotos(
 
         if (roomEndedRef.current) {
           throw new Error('This room has ended. Photos can no longer be published.')
+        }
+        if (finalizedPhotoSetIdRef.current) {
+          throw new Error('This strip is finalized and can no longer be replaced.')
         }
 
         const completionResponse = await fetch(
@@ -262,6 +314,8 @@ export function useSharedRoomPhotos(
             id: publication.id,
             createdAt: new Date().toISOString(),
             isOwn: true,
+            isFinalized: false,
+            renderConfig: null,
             photos: previewPhotos,
           },
           true
@@ -286,7 +340,11 @@ export function useSharedRoomPhotos(
 
   const publishPhotos = useCallback(
     (photos: CapturedPhoto[], publicationId: string): Promise<string | null> => {
-      if (photos.length !== SHARED_PHOTO_COUNT || !isPhotoSetId(publicationId)) {
+      if (
+        finalizedPhotoSetIdRef.current ||
+        photos.length !== SHARED_PHOTO_COUNT ||
+        !isPhotoSetId(publicationId)
+      ) {
         return Promise.resolve(null)
       }
 
@@ -318,10 +376,10 @@ export function useSharedRoomPhotos(
     // Defer the network-driven state transition out of the effect body. The
     // generation guard in refresh still resolves overlapping signals safely.
     const timeoutId = window.setTimeout(() => {
-      void refresh(photoSetSignal ?? undefined)
+      void refresh(finalizedPhotoSetId ?? photoSetSignal ?? undefined)
     }, 0)
     return () => window.clearTimeout(timeoutId)
-  }, [photoSetSignal, refresh, roomEnded, subscriptionVersion])
+  }, [finalizedPhotoSetId, photoSetSignal, refresh, roomEnded, subscriptionVersion])
 
   useEffect(() => {
     return () => {

@@ -107,6 +107,7 @@ export default async function RoomPage({ params }: RoomPageProps) {
           participant={accessResult.participant}
           hostKey={accessResult.hostKey}
           isHost={accessResult.isHost}
+          initialFinalization={accessResult.finalization}
         />
       </div>
     </main>

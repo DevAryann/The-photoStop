@@ -8,6 +8,10 @@ import {
   type RoomPresenceKey,
   type RoomState,
 } from '@/lib/room-presence'
+import {
+  isPhotoStripRenderConfig,
+  type RoomFinalization,
+} from '@/lib/photo-strip-finalization'
 
 /**
  * Room Access Validation Result
@@ -26,6 +30,7 @@ export type RoomAccessResult =
       participant: RoomPresenceIdentity
       hostKey: RoomPresenceKey
       isHost: boolean
+      finalization: RoomFinalization | null
     }
   | { authorized: false }
 
@@ -36,6 +41,7 @@ export interface AuthorizedRoomCapability {
   participant: RoomPresenceIdentity
   hostKey: RoomPresenceKey
   isHost: boolean
+  finalization: RoomFinalization | null
 }
 
 /**
@@ -82,6 +88,7 @@ export async function validateRoomAccess(
     participant: access.participant,
     hostKey: access.hostKey,
     isHost: access.isHost,
+    finalization: access.finalization,
   }
 }
 
@@ -116,7 +123,7 @@ export async function authorizeRoomCapability(
     // Step 1: Get the room and verify it exists, is not expired, and is active/waiting
     const { data: roomData, error: roomError } = await supabase
       .from('rooms')
-      .select('id, state, host_participant_id')
+      .select('id, state, host_participant_id, finalized_photo_set_id, finalized_at, finalized_render_config')
       .eq('code', roomCode)
       .gt('expires_at', new Date().toISOString())
       .in('state', ['waiting', 'active', 'ended'])
@@ -159,6 +166,29 @@ export async function authorizeRoomCapability(
 
     const presenceKey = participantRecord.presence_key
     const isHost = participantRecord.id === roomData.host_participant_id
+    const hasAnyFinalizationField = Boolean(
+      roomData.finalized_photo_set_id ||
+      roomData.finalized_at ||
+      roomData.finalized_render_config
+    )
+    let finalization: RoomFinalization | null = null
+
+    if (hasAnyFinalizationField) {
+      if (
+        typeof roomData.finalized_photo_set_id !== 'string' ||
+        typeof roomData.finalized_at !== 'string' ||
+        !isPhotoStripRenderConfig(roomData.finalized_render_config)
+      ) {
+        console.error('[Room Validation] Invalid finalized strip state:', roomData.id)
+        return null
+      }
+
+      finalization = {
+        photoSetId: roomData.finalized_photo_set_id,
+        finalizedAt: roomData.finalized_at,
+        renderConfig: roomData.finalized_render_config,
+      }
+    }
 
     return {
       roomId: roomData.id,
@@ -170,6 +200,7 @@ export async function authorizeRoomCapability(
       },
       hostKey: hostRecord.presence_key,
       isHost,
+      finalization,
     }
   } catch (error) {
     // Unexpected error - log server-side, deny access

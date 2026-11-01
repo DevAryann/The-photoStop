@@ -1,6 +1,7 @@
 'use client'
 
 import type { SharedRoomPhotoSet } from '@/hooks/use-shared-room-photos'
+import type { RoomFinalization } from '@/lib/photo-strip-finalization'
 
 interface SharedPhotoStripProps {
   latestPhotoSet: SharedRoomPhotoSet | null
@@ -10,6 +11,7 @@ interface SharedPhotoStripProps {
   loadError: string | null
   publicationStatus: 'idle' | 'uploading' | 'error'
   publicationError: string | null
+  finalization: RoomFinalization | null
   onOpen: () => void
   onRetryLoad: () => void
   onRetryPublication: () => void
@@ -23,6 +25,7 @@ export function SharedPhotoStrip({
   loadError,
   publicationStatus,
   publicationError,
+  finalization,
   onOpen,
   onRetryLoad,
   onRetryPublication,
@@ -43,11 +46,23 @@ export function SharedPhotoStrip({
     >
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h2 id="shared-strip-heading" className="text-sm font-semibold text-[var(--text-primary)]">
-            Shared photo strip
-          </h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 id="shared-strip-heading" className="text-sm font-semibold text-[var(--text-primary)]">
+              Shared photo strip
+            </h2>
+            {finalization && (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--success)]/40 bg-[var(--success)]/10 px-2 py-0.5 text-[0.6875rem] font-semibold text-[var(--success)]">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                  <path d="M3 6.25L5.1 8.35L9.25 4.2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                Finalized
+              </span>
+            )}
+          </div>
           <p className="mt-1 text-sm leading-relaxed text-[var(--text-secondary)]">
-            {publicationStatus === 'uploading'
+            {finalization
+              ? 'The host finalized this exact photo set and its edits. It is now read-only for everyone.'
+              : publicationStatus === 'uploading'
               ? 'Sharing your four photos with this room…'
               : latestPhotoSet && isApplied
                 ? 'You’re viewing the latest photos in this room.'
@@ -71,7 +86,7 @@ export function SharedPhotoStrip({
         )}
       </div>
 
-      {latestPhotoSet && !isApplied && (
+      {latestPhotoSet && !isApplied && !finalization && (
         <div className="mt-4">
           <div className="grid grid-cols-4 gap-2" aria-label="Latest shared photos">
             {latestPhotoSet.photos.map((photo, index) => (
@@ -94,9 +109,9 @@ export function SharedPhotoStrip({
             onClick={onOpen}
             className="mt-3 min-h-11 w-full rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] px-5 py-2.5 font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
           >
-            Open shared strip
+            {finalization ? 'Open finalized strip' : 'Open shared strip'}
           </button>
-          {hasCurrentPhotos && (
+          {hasCurrentPhotos && !finalization && (
             <p className="mt-2 text-xs leading-relaxed text-[var(--text-secondary)]">
               Opening these photos replaces the set currently in your editor. Your current edits won’t carry over.
             </p>

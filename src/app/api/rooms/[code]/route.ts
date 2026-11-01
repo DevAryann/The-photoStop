@@ -28,6 +28,7 @@ export async function GET(_request: Request, context: RouteContext) {
     {
       state: access.roomState,
       isHost: access.isHost,
+      finalization: access.finalization,
     },
     { headers: noStoreHeaders }
   )

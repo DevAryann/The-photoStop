@@ -1,22 +1,23 @@
 'use client'
 
 import { createContext, useContext, useState, useCallback, ReactNode } from 'react'
+import {
+  FINALIZED_CAPTION_MAX_LENGTH,
+  MAX_FINALIZED_STICKERS,
+  type PhotoFilter,
+  type PhotoStripRenderConfig,
+  type PhotoStripSticker,
+  type PhotoStripStyle,
+} from '@/lib/photo-strip-finalization'
 
 export interface CapturedPhoto {
   blob: Blob
   objectUrl: string
 }
 
-export const MAX_STICKERS = 8
-export const CAPTION_MAX_LENGTH = 80
-
-export type PhotoFilter = 'original' | 'vintage' | 'grayscale' | 'warm'
-
-export interface PhotoStripSticker {
-  id: string
-  emoji: string
-  slot: number
-}
+export const MAX_STICKERS = MAX_FINALIZED_STICKERS
+export const CAPTION_MAX_LENGTH = FINALIZED_CAPTION_MAX_LENGTH
+export type { PhotoFilter, PhotoStripSticker }
 
 interface PhotoStripContextType {
   photos: CapturedPhoto[]
@@ -25,8 +26,8 @@ interface PhotoStripContextType {
   clearPhotos: () => void
   backgroundColor: string
   setBackgroundColor: (color: string) => void
-  stripStyle: 'plain' | 'polaroid' | 'retro'
-  setStripStyle: (style: 'plain' | 'polaroid' | 'retro') => void
+  stripStyle: PhotoStripStyle
+  setStripStyle: (style: PhotoStripStyle) => void
   photoFilter: PhotoFilter
   setPhotoFilter: (filter: PhotoFilter) => void
   stickers: PhotoStripSticker[]
@@ -34,6 +35,10 @@ interface PhotoStripContextType {
   removeSticker: (id: string) => void
   caption: string
   setCaption: (caption: string) => void
+  applyFinalizedStrip: (
+    photos: CapturedPhoto[],
+    renderConfig: PhotoStripRenderConfig
+  ) => void
 }
 
 const PhotoStripContext = createContext<PhotoStripContextType | undefined>(undefined)
@@ -41,7 +46,7 @@ const PhotoStripContext = createContext<PhotoStripContextType | undefined>(undef
 export function PhotoStripProvider({ children }: { children: ReactNode }) {
   const [photos, setPhotos] = useState<CapturedPhoto[]>([])
   const [backgroundColor, setBackgroundColor] = useState<string>('#ffffff')
-  const [stripStyle, setStripStyle] = useState<'plain' | 'polaroid' | 'retro'>('plain')
+  const [stripStyle, setStripStyle] = useState<PhotoStripStyle>('plain')
   const [photoFilter, setPhotoFilter] = useState<PhotoFilter>('original')
   const [stickers, setStickers] = useState<PhotoStripSticker[]>([])
   const [caption, setCaptionValue] = useState('')
@@ -94,6 +99,18 @@ export function PhotoStripProvider({ children }: { children: ReactNode }) {
     resetEdits()
   }, [resetEdits])
 
+  const applyFinalizedStrip = useCallback((
+    nextPhotos: CapturedPhoto[],
+    renderConfig: PhotoStripRenderConfig
+  ) => {
+    replacePhotos(nextPhotos)
+    setBackgroundColor(renderConfig.backgroundColor)
+    setStripStyle(renderConfig.stripStyle)
+    setPhotoFilter(renderConfig.photoFilter)
+    setStickers(renderConfig.stickers.map((sticker) => ({ ...sticker })))
+    setCaptionValue(renderConfig.caption)
+  }, [replacePhotos])
+
   return (
     <PhotoStripContext.Provider
       value={{
@@ -112,6 +129,7 @@ export function PhotoStripProvider({ children }: { children: ReactNode }) {
         removeSticker,
         caption,
         setCaption,
+        applyFinalizedStrip,
       }}
     >
       {children}

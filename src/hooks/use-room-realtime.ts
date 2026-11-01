@@ -14,6 +14,10 @@ import {
 } from '@/lib/room-presence'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import { isPhotoSetId } from '@/lib/shared-photos'
+import {
+  isRoomFinalization,
+  type RoomFinalization,
+} from '@/lib/photo-strip-finalization'
 
 export type RoomPresenceStatus =
   | 'connecting'
@@ -68,7 +72,8 @@ export function useRoomRealtime(
   roomCode: string,
   initialState: RoomState,
   participant: RoomPresenceIdentity,
-  hostKey: RoomPresenceKey
+  hostKey: RoomPresenceKey,
+  initialFinalization: RoomFinalization | null
 ) {
   const [roomState, setRoomState] = useState<RoomState>(initialState)
   const [participants, setParticipants] = useState<RoomPresenceParticipant[]>([])
@@ -77,6 +82,9 @@ export function useRoomRealtime(
   const [retryCount, setRetryCount] = useState(0)
   const [photoSetSignal, setPhotoSetSignal] = useState<string | null>(null)
   const [subscriptionVersion, setSubscriptionVersion] = useState(0)
+  const [finalization, setFinalization] = useState<RoomFinalization | null>(
+    initialFinalization
+  )
   const activityRef = useRef<RoomActivity>('idle')
   const requestActivityTrackRef = useRef<(() => void) | null>(null)
   const stateRefreshAbortRef = useRef<AbortController | null>(null)
@@ -93,13 +101,19 @@ export function useRoomRealtime(
       })
       if (!response.ok) return
 
-      const body = await response.json() as { state?: unknown }
+      const body = await response.json() as {
+        state?: unknown
+        finalization?: unknown
+      }
       if (
         body.state === 'waiting' ||
         body.state === 'active' ||
         body.state === 'ended'
       ) {
         setRoomState(body.state)
+      }
+      if (body.finalization === null || isRoomFinalization(body.finalization)) {
+        setFinalization(body.finalization)
       }
     } catch (error) {
       if (!(error instanceof DOMException && error.name === 'AbortError')) {
@@ -110,6 +124,10 @@ export function useRoomRealtime(
 
   const markRoomEnded = useCallback(() => {
     setRoomState('ended')
+  }, [])
+
+  const markRoomFinalized = useCallback((next: RoomFinalization) => {
+    setFinalization(next)
   }, [])
 
   const retryPresence = useCallback(() => {
@@ -200,6 +218,18 @@ export function useRoomRealtime(
           ) {
             // Public Realtime messages are only invalidation signals. Verify the
             // transition against the capability-protected server state.
+            void refreshRoomState()
+          }
+        }
+      )
+      .on(
+        'broadcast',
+        { event: 'strip_finalized' },
+        (message: { payload?: { photoSetId?: unknown } }) => {
+          if (
+            isCurrentSubscription &&
+            isPhotoSetId(message.payload?.photoSetId)
+          ) {
             void refreshRoomState()
           }
         }
@@ -332,5 +362,7 @@ export function useRoomRealtime(
     photoSetSignal,
     subscriptionVersion,
     markRoomEnded,
+    finalization,
+    markRoomFinalized,
   }
 }

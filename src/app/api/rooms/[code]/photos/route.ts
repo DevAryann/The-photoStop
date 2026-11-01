@@ -80,15 +80,9 @@ async function cleanupOlderPhotoSets(
   if (error || !olderSets?.length) return
 
   const oldPaths = olderSets.flatMap((photoSet) => photoSet.storage_paths as string[])
-  const { error: storageError } = await supabase.storage
-    .from(SHARED_PHOTO_BUCKET)
-    .remove(oldPaths)
-
-  if (storageError) {
-    console.error('[Shared Photos] Old object cleanup failed:', storageError)
-    return
-  }
-
+  // Delete the manifest first. The database trigger serializes this mutation
+  // against finalization, so storage bytes selected as final can never be
+  // removed in the gap between object cleanup and manifest cleanup.
   const { error: manifestError } = await supabase
     .from('room_photo_sets')
     .delete()
@@ -96,6 +90,17 @@ async function cleanupOlderPhotoSets(
 
   if (manifestError) {
     console.error('[Shared Photos] Old manifest cleanup failed:', manifestError)
+    return
+  }
+
+  const { error: storageError } = await supabase.storage
+    .from(SHARED_PHOTO_BUCKET)
+    .remove(oldPaths)
+
+  if (storageError) {
+    // The inaccessible objects can be removed by a later storage cleanup job;
+    // preserving database consistency is more important than eager deletion.
+    console.error('[Shared Photos] Old object cleanup failed:', storageError)
   }
 }
 
@@ -111,22 +116,35 @@ export async function GET(_request: Request, context: RouteContext) {
   }
 
   const supabase = createAdminClient()
-  const { data: photoSet, error } = await supabase
+  let photoSetQuery = supabase
     .from('room_photo_sets')
     .select('id, participant_id, storage_paths, ready_at')
     .eq('room_id', access.roomId)
     .eq('status', 'ready')
-    .order('ready_at', { ascending: false })
-    .order('id', { ascending: false })
-    .limit(1)
-    .maybeSingle()
+
+  photoSetQuery = access.finalization
+    ? photoSetQuery.eq('id', access.finalization.photoSetId)
+    : photoSetQuery
+        .order('ready_at', { ascending: false })
+        .order('id', { ascending: false })
+
+  const { data: photoSet, error } = await photoSetQuery.limit(1).maybeSingle()
 
   if (error) {
     console.error('[Shared Photos] Latest set lookup failed:', error)
     return jsonNoStore({ error: 'Shared photos could not be loaded' }, { status: 503 })
   }
 
-  if (!photoSet) return jsonNoStore({ photoSet: null })
+  if (!photoSet) {
+    if (access.finalization) {
+      console.error('[Shared Photos] Finalized manifest is unavailable:', access.finalization.photoSetId)
+      return jsonNoStore(
+        { error: 'The finalized strip could not be loaded. Please try again.' },
+        { status: 503 }
+      )
+    }
+    return jsonNoStore({ photoSet: null })
+  }
 
   const storagePaths = photoSet.storage_paths as string[]
   const signedPhotos = await Promise.all(
@@ -155,6 +173,8 @@ export async function GET(_request: Request, context: RouteContext) {
       id: photoSet.id,
       createdAt: photoSet.ready_at,
       isOwn: photoSet.participant_id === access.participantId,
+      isFinalized: Boolean(access.finalization),
+      renderConfig: access.finalization?.renderConfig ?? null,
       photos: signedPhotos,
     },
   })
@@ -169,6 +189,12 @@ export async function POST(request: Request, context: RouteContext) {
   }
   if (access.roomState === 'ended') {
     return jsonNoStore({ error: 'This room has ended' }, { status: 409 })
+  }
+  if (access.finalization) {
+    return jsonNoStore(
+      { error: 'This strip is finalized and can no longer be replaced.' },
+      { status: 409 }
+    )
   }
 
   let body: { publicationId?: unknown; files?: unknown }
@@ -225,22 +251,45 @@ export async function POST(request: Request, context: RouteContext) {
       if (insertError.message?.includes('room_ended')) {
         return jsonNoStore({ error: 'This room has ended' }, { status: 409 })
       }
+      if (insertError.message?.includes('strip_finalized')) {
+        return jsonNoStore(
+          { error: 'This strip is finalized and can no longer be replaced.' },
+          { status: 409 }
+        )
+      }
       console.error('[Shared Photos] Reservation failed:', insertError)
       return jsonNoStore({ error: 'Photo sharing could not start' }, { status: 503 })
     }
   }
 
+  const prefix = `photo-sets/${publicationId}`
+  const { data: existingObjects, error: listError } = await supabase.storage
+    .from(SHARED_PHOTO_BUCKET)
+    .list(prefix, { limit: SHARED_PHOTO_COUNT + 1 })
+
+  if (listError) {
+    console.error('[Shared Photos] Existing upload lookup failed:', listError)
+    return jsonNoStore({ error: 'Photo sharing could not start' }, { status: 503 })
+  }
+
+  const existingPaths = new Set(
+    (existingObjects ?? []).map((object) => `${prefix}/${object.name}`)
+  )
+  const missingUploads = storagePaths
+    .map((path, index) => ({ path, index }))
+    .filter((upload) => !existingPaths.has(upload.path))
+
   const uploads = await Promise.all(
-    storagePaths.map(async (path) => {
+    missingUploads.map(async ({ path, index }) => {
       const { data, error: signedUploadError } = await supabase.storage
         .from(SHARED_PHOTO_BUCKET)
-        .createSignedUploadUrl(path, { upsert: true })
+        .createSignedUploadUrl(path, { upsert: false })
 
       if (signedUploadError || !data?.token) {
         throw signedUploadError ?? new Error('Signed upload token was not created')
       }
 
-      return { path, token: data.token }
+      return { path, token: data.token, index }
     })
   ).catch((signedUploadError: unknown) => {
     console.error('[Shared Photos] Signed upload creation failed:', signedUploadError)
@@ -263,6 +312,12 @@ export async function PATCH(request: Request, context: RouteContext) {
   }
   if (access.roomState === 'ended') {
     return jsonNoStore({ error: 'This room has ended' }, { status: 409 })
+  }
+  if (access.finalization) {
+    return jsonNoStore(
+      { error: 'This strip is finalized and can no longer be replaced.' },
+      { status: 409 }
+    )
   }
 
   let body: { publicationId?: unknown }
@@ -326,6 +381,12 @@ export async function PATCH(request: Request, context: RouteContext) {
   if (updateError) {
     if (updateError.message?.includes('room_ended')) {
       return jsonNoStore({ error: 'This room has ended' }, { status: 409 })
+    }
+    if (updateError.message?.includes('strip_finalized')) {
+      return jsonNoStore(
+        { error: 'This strip is finalized and can no longer be replaced.' },
+        { status: 409 }
+      )
     }
     console.error('[Shared Photos] Completion failed:', updateError)
     return jsonNoStore({ error: 'Photos uploaded but could not be shared' }, { status: 503 })
