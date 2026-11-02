@@ -1,7 +1,9 @@
 'use client'
 
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { useCamera } from '@/hooks/use-camera'
+import type { UseCameraReturn } from '@/hooks/use-camera'
+import type { UseRoomWebRtcReturn } from '@/hooks/use-room-webrtc'
+import { DualCameraStage } from '@/components/camera/dual-camera-stage'
 import {
   usePhotoStrip,
   type CapturedPhoto,
@@ -31,6 +33,10 @@ import {
 type CapturePhase = 'idle' | 'countdown' | 'capturing' | 'pause' | 'complete'
 
 interface CameraViewProps {
+  camera: UseCameraReturn
+  webrtc: UseRoomWebRtcReturn
+  localLabel: string
+  remoteLabel: string
   onReviewOpen?: () => void
   onEditorOpen?: () => void
   onBackToCamera?: () => void
@@ -39,13 +45,17 @@ interface CameraViewProps {
 }
 
 export function CameraView({
+  camera,
+  webrtc,
+  localLabel,
+  remoteLabel,
   onReviewOpen,
   onEditorOpen,
   onBackToCamera,
   onPhotosReady,
   onCaptureActivityChange,
-}: CameraViewProps = {}) {
-  const { status, error, videoRef, streamRef, startCamera, stopCamera } = useCamera()
+}: CameraViewProps) {
+  const { status, error, videoRef, streamRef, startCamera, stopCamera } = camera
   const { setPhotos: setContextPhotos, photos: contextPhotos, clearPhotos: clearContextPhotos } = usePhotoStrip()
   const [photos, setPhotos] = useState<CapturedPhoto[]>([])
   const [capturePhase, setCapturePhase] = useState<CapturePhase>('idle')
@@ -64,9 +74,6 @@ export function CameraView({
   const retakeButtonRefs = useRef<Array<HTMLButtonElement | null>>([])
   const focusAfterRetakeRef = useRef<number | null>(null)
   const capturePublicationIdRef = useRef<string | null>(null)
-
-  // Debug logging for render cycles
-  console.log('[CameraView] Render - status:', status, 'photos:', photos.length, 'phase:', capturePhase)
 
   const cancelPendingWait = useCallback(() => {
     if (timerRef.current) {
@@ -99,8 +106,6 @@ export function CameraView({
     const video = videoRef.current
     const canvas = canvasRef.current
     const stream = streamRef.current
-
-    console.log('[Camera] Capturing photo')
 
     // Verify stream has active video tracks
     const videoTracks = stream.getVideoTracks()
@@ -150,7 +155,6 @@ export function CameraView({
       objectUrl: URL.createObjectURL(blob),
     }
 
-    console.log('[Camera] Photo captured successfully, blob size:', blob.size)
     return capturedPhoto
   }, [videoRef, streamRef])
 
@@ -162,7 +166,6 @@ export function CameraView({
 
     const runId = ++captureRunRef.current
     capturePublicationIdRef.current = crypto.randomUUID()
-    console.log('[Camera] Starting 4-photo capture sequence')
     setCaptureError(null)
     photos.forEach((photo) => URL.revokeObjectURL(photo.objectUrl))
     setPhotos([])
@@ -194,7 +197,6 @@ export function CameraView({
       }
 
       setCapturePhase('complete')
-      console.log('[Camera] All 4 photos captured')
     } catch (err) {
       if (runId !== captureRunRef.current) return
       console.error('[Camera] Error capturing photo:', err)
@@ -230,6 +232,14 @@ export function CameraView({
     stopCamera()
     setRetakeIndex(null)
   }, [cancelPendingWait, retakeIndex, stopCamera])
+
+  const handleStopSharing = useCallback(() => {
+    captureRunRef.current += 1
+    cancelPendingWait()
+    setCapturePhase('idle')
+    setCountdown(3)
+    stopCamera()
+  }, [cancelPendingWait, stopCamera])
 
   const startRetakeCapture = useCallback(async () => {
     if (retakeIndex === null || capturePhase !== 'idle') return
@@ -310,11 +320,8 @@ export function CameraView({
   const handleContinueToEditor = useCallback(() => {
     const photosToReview = capturePhase === 'complete' && photos.length === 4 ? photos : contextPhotos
     if (photosToReview.length !== 4) {
-      console.error('[Camera] Not all photos ready')
       return
     }
-
-    console.log('[Camera] Transferring 4 photos to editor context')
 
     // Transfer photos to context for editor (reuse if already in context, else use local)
     if (photos.length === 4) {
@@ -368,16 +375,26 @@ export function CameraView({
       const publicationId = capturePublicationIdRef.current ?? crypto.randomUUID()
       capturePublicationIdRef.current = publicationId
       onPhotosReady?.(photos, publicationId)
+      // The review screen owns no live media. Stopping here also immediately
+      // closes the peer connection through the shared room camera lifecycle.
+      stopCamera()
       onReviewOpen()
     }
-  }, [capturePhase, photos.length, onPhotosReady, onReviewOpen, photos, setContextPhotos])
+  }, [
+    capturePhase,
+    photos.length,
+    onPhotosReady,
+    onReviewOpen,
+    photos,
+    setContextPhotos,
+    stopCamera,
+  ])
 
   // Review screen: show 4 photos from either local capture or context (from editor return)
   // Only render this if we're in review mode (onReviewOpen not provided) or transitioning
   const photosToReview = capturePhase === 'complete' && photos.length === 4 ? photos : contextPhotos
   if (photosToReview.length === 4 && !onReviewOpen && retakeIndex === null) {
     // Only show inline review if onReviewOpen is NOT provided (we're already in review mode)
-    console.log('[CameraView] Rendering 4-photo review grid')
     return (
       <div className="w-full flex flex-col items-center gap-6">
         {/* 4-Photo Grid */}
@@ -481,17 +498,22 @@ export function CameraView({
                 <path d="M12 8L14 4H18L20 8" stroke="var(--text-secondary)" strokeWidth="2" />
               </svg>
             </div>
-            <div className="flex flex-col gap-2">
-              {retakeIndex !== null && (
-                <h2 className="font-semibold text-[var(--text-primary)]">
-                  Retake photo {retakeIndex + 1}
-                </h2>
-              )}
-              <p className="text-sm text-[var(--text-secondary)]">
+            <div className="flex max-w-md flex-col gap-2">
+              <h2 className="font-semibold text-[var(--text-primary)]">
+                {retakeIndex !== null
+                  ? `Retake photo ${retakeIndex + 1}`
+                  : 'Share your camera'}
+              </h2>
+              <p className="text-sm leading-relaxed text-[var(--text-secondary)]">
                 {retakeIndex !== null
                   ? 'Your original stays in place until a replacement is captured.'
-                  : 'Ready to capture your first photo'}
+                  : `With your permission, your live camera will be shared with ${remoteLabel} in this room.`}
               </p>
+              {retakeIndex === null && (
+                <p className="text-xs font-medium text-[var(--text-tertiary)]">
+                  Video only. Your microphone stays off.
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -520,7 +542,7 @@ export function CameraView({
             onClick={startCamera}
             className="min-h-11 rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] px-8 py-3 font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
           >
-            Start Camera
+            {retakeIndex !== null ? 'Start Camera' : 'Share My Camera'}
           </button>
         </div>
       </div>
@@ -536,9 +558,13 @@ export function CameraView({
             <div className="w-12 h-12 border-4 border-[var(--primary)] border-t-transparent rounded-full animate-spin motion-reduce:animate-none" aria-hidden="true" />
             <div>
               <p className="font-medium text-[var(--text-primary)]">
-                {retakeIndex !== null ? `Preparing photo ${retakeIndex + 1}` : 'Preparing camera'}
+                {retakeIndex !== null
+                  ? `Preparing photo ${retakeIndex + 1} — sharing video only`
+                  : 'Waiting for camera permission'}
               </p>
-              <p className="mt-1 text-sm text-[var(--text-secondary)]">Requesting camera access...</p>
+              <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                Your microphone remains off.
+              </p>
             </div>
           </div>
         </div>
@@ -633,15 +659,16 @@ export function CameraView({
         </div>
       )}
 
-      {/* Video Preview */}
-      <div className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-black relative">
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          className="w-full h-full object-cover"
-        />
+      {/* The partner stays visually primary; the existing local stream is
+          attached once to the smaller self-preview and is also used for capture. */}
+      <DualCameraStage
+        localVideoRef={videoRef}
+        remoteStream={webrtc.remoteStream}
+        connectionStatus={webrtc.status}
+        connectionError={webrtc.error}
+        localLabel={localLabel}
+        remoteLabel={remoteLabel}
+      >
 
         {/* Countdown Overlay */}
         {capturePhase === 'countdown' && (
@@ -661,7 +688,7 @@ export function CameraView({
         {capturePhase === 'pause' && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/40">
             <div className="flex flex-col items-center gap-3">
-              <div className="w-12 h-12 border-4 border-white border-t-transparent rounded-full animate-spin" />
+               <div className="w-12 h-12 border-4 border-white border-t-transparent rounded-full animate-spin motion-reduce:animate-none" aria-hidden="true" />
               <p className="text-white text-lg font-medium">Get ready...</p>
             </div>
           </div>
@@ -691,10 +718,33 @@ export function CameraView({
             </p>
           </div>
         )}
-      </div>
+      </DualCameraStage>
 
       {/* Hidden canvas for capturing frames */}
       <canvas ref={canvasRef} className="hidden" />
+
+      {webrtc.error && (
+        <div
+          className="flex w-full flex-col gap-3 rounded-lg border border-[var(--error)]/35 bg-[var(--error)]/10 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+          role="alert"
+        >
+          <p className="text-sm leading-relaxed text-[var(--text-primary)]">
+            {webrtc.error.message}
+          </p>
+          {webrtc.status !== 'unsupported' &&
+            webrtc.error.code !== 'access_lost' && (
+              <button
+                type="button"
+                onClick={webrtc.reconnect}
+                className="min-h-11 shrink-0 rounded-lg border border-[var(--error)]/55 px-4 py-2 text-sm font-semibold text-[var(--text-primary)] transition-colors hover:bg-[var(--error)]/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--error)]"
+              >
+                {webrtc.error.code === 'another_tab'
+                  ? 'Use This Tab'
+                  : 'Reconnect'}
+              </button>
+            )}
+        </div>
+      )}
 
       {captureError && (
         <p
@@ -714,15 +764,17 @@ export function CameraView({
         >
           Cancel Retake
         </button>
-      ) : capturePhase === 'idle' ? (
+      ) : (
         <button
           type="button"
-          onClick={stopCamera}
+          onClick={handleStopSharing}
           className="min-h-11 px-4 text-sm text-[var(--text-secondary)] hover:text-[var(--primary)] transition-colors underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
         >
-          Stop Camera
+          {capturePhase === 'idle'
+            ? 'Stop Sharing Camera'
+            : 'Stop Camera & Cancel Capture'}
         </button>
-      ) : null}
+      )}
 
       {/* Capture in Progress Message */}
       {capturePhase !== 'idle' && (

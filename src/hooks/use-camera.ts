@@ -1,20 +1,12 @@
 'use client'
 
-import { useRef, useCallback, useState, useEffect } from 'react'
-
-/**
- * Camera hook for managing MediaStream access and lifecycle
- *
- * V1 Scope:
- * - Request camera permission on explicit user action
- * - Provide live video stream
- * - Properly cleanup MediaStream tracks on unmount
- *
- * Security/Privacy:
- * - Camera access only after user clicks "Start Camera"
- * - All tracks stopped on unmount or when camera is stopped
- * - No automatic background access
- */
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react'
 
 export type CameraStatus =
   | 'idle'
@@ -25,272 +17,273 @@ export type CameraStatus =
   | 'error'
 
 export interface CameraError {
-  type: 'permission_denied' | 'not_found' | 'not_supported' | 'unknown'
+  type:
+    | 'permission_denied'
+    | 'not_found'
+    | 'not_supported'
+    | 'hardware_error'
+    | 'constraints_error'
+    | 'security_error'
+    | 'aborted'
+    | 'unknown'
   message: string
 }
 
 export interface UseCameraReturn {
   status: CameraStatus
   error: CameraError | null
-  videoRef: React.RefObject<HTMLVideoElement | null>
-  streamRef: React.RefObject<MediaStream | null>
+  stream: MediaStream | null
+  videoRef: RefObject<HTMLVideoElement | null>
+  streamRef: RefObject<MediaStream | null>
   startCamera: () => Promise<void>
   stopCamera: () => void
 }
 
+function getCameraError(error: unknown): {
+  status: Exclude<CameraStatus, 'idle' | 'requesting' | 'active'>
+  error: CameraError
+} {
+  if (error instanceof DOMException || error instanceof Error) {
+    if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+      return {
+        status: 'denied',
+        error: {
+          type: 'permission_denied',
+          message:
+            'Camera access was blocked. Allow camera access in your browser settings, then try again.',
+        },
+      }
+    }
+
+    if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+      return {
+        status: 'unavailable',
+        error: {
+          type: 'not_found',
+          message:
+            'No camera was found. Connect a camera or check that it is enabled, then try again.',
+        },
+      }
+    }
+
+    if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
+      return {
+        status: 'error',
+        error: {
+          type: 'hardware_error',
+          message:
+            'Your camera could not start. Close other apps using it, reconnect the device, and try again.',
+        },
+      }
+    }
+
+    if (error.name === 'OverconstrainedError' || error.name === 'ConstraintNotSatisfiedError') {
+      return {
+        status: 'error',
+        error: {
+          type: 'constraints_error',
+          message:
+            'This camera cannot provide a compatible video stream. Try another camera or browser.',
+        },
+      }
+    }
+
+    if (error.name === 'SecurityError') {
+      return {
+        status: 'unavailable',
+        error: {
+          type: 'security_error',
+          message:
+            'Camera access requires a secure HTTPS page, except on localhost.',
+        },
+      }
+    }
+
+    if (error.name === 'AbortError') {
+      return {
+        status: 'error',
+        error: {
+          type: 'aborted',
+          message: 'Camera startup was interrupted. Please try again.',
+        },
+      }
+    }
+
+    if (error.message === 'CAMERA_NOT_SUPPORTED') {
+      return {
+        status: 'unavailable',
+        error: {
+          type: 'not_supported',
+          message: 'This browser does not support camera access.',
+        },
+      }
+    }
+  }
+
+  return {
+    status: 'error',
+    error: {
+      type: 'unknown',
+      message: 'The camera could not start. Check the device and try again.',
+    },
+  }
+}
+
 /**
- * Hook for camera access and stream management
- *
- * @returns Camera controls and state
- *
- * @example
- * const { status, videoRef, startCamera, stopCamera } = useCamera()
- *
- * // In component:
- * <button onClick={startCamera}>Start Camera</button>
- * <video ref={videoRef} autoPlay playsInline muted />
+ * Owns the room's single local camera stream. Permission is requested only from
+ * the explicit `startCamera` action; concurrent starts share one request.
  */
 export function useCamera(): UseCameraReturn {
   const [status, setStatus] = useState<CameraStatus>('idle')
   const [error, setError] = useState<CameraError | null>(null)
-
-  // Store MediaStream in ref to avoid re-renders
+  const [stream, setStream] = useState<MediaStream | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
-  // Invalidates camera requests that finish after cancellation or unmount.
   const requestIdRef = useRef(0)
+  const requestPromiseRef = useRef<Promise<void> | null>(null)
+  const removeTrackListenersRef = useRef<(() => void) | null>(null)
 
-  /**
-   * Effect: Attach stream to video element when both are available
-   * This runs AFTER the video element is mounted in the DOM
-   */
+  const releaseCurrentStream = useCallback(() => {
+    removeTrackListenersRef.current?.()
+    removeTrackListenersRef.current = null
+
+    const current = streamRef.current
+    if (current) current.getTracks().forEach((track) => track.stop())
+    streamRef.current = null
+    setStream(null)
+
+    if (videoRef.current) videoRef.current.srcObject = null
+  }, [])
+
   useEffect(() => {
-    const stream = streamRef.current
     const video = videoRef.current
+    if (!video || status !== 'active' || !stream) return
 
-    if (!stream || !video) {
-      return
-    }
-
-    // Diagnostic logging
-    console.log('[Camera] Attaching stream to video element')
-    console.log('[Camera] Stream video tracks:', stream.getVideoTracks().length)
-    console.log('[Camera] Video element ready:', video.readyState)
-
-    // Check if stream has active video tracks
-    const videoTracks = stream.getVideoTracks()
-    if (videoTracks.length === 0) {
-      console.error('[Camera] Stream has no video tracks')
-      setError({
-        type: 'unknown',
-        message: 'Camera stream has no video tracks',
-      })
-      setStatus('error')
-      return
-    }
-
-    const hasActiveTrack = videoTracks.some((track) => track.readyState === 'live')
-    if (!hasActiveTrack) {
-      console.error('[Camera] No active video tracks in stream')
-      setError({
-        type: 'unknown',
-        message: 'Camera stream has no active video tracks',
-      })
-      setStatus('error')
-      return
-    }
-
-    // Attach stream to video element
     video.srcObject = stream
-    console.log('[Camera] Stream attached to video.srcObject')
+    void video.play().catch(() => {
+      // The preview is muted and normally autoplays. If a browser still blocks
+      // it, the stream remains valid and a later user interaction can resume it.
+    })
 
-    // Add event listeners for diagnostics
-    const handleLoadedMetadata = () => {
-      console.log('[Camera] Video loadedmetadata event')
-      console.log('[Camera] Video dimensions:', video.videoWidth, 'x', video.videoHeight)
-      console.log('[Camera] Video readyState:', video.readyState)
-    }
-
-    const handleCanPlay = () => {
-      console.log('[Camera] Video canplay event')
-      console.log('[Camera] Video readyState:', video.readyState)
-    }
-
-    const handlePlaying = () => {
-      console.log('[Camera] Video playing event')
-      console.log('[Camera] Video dimensions:', video.videoWidth, 'x', video.videoHeight)
-    }
-
-    const handleError = (e: Event) => {
-      console.error('[Camera] Video error event:', e)
-    }
-
-    video.addEventListener('loadedmetadata', handleLoadedMetadata)
-    video.addEventListener('canplay', handleCanPlay)
-    video.addEventListener('playing', handlePlaying)
-    video.addEventListener('error', handleError)
-
-    // Explicitly start playback
-    // autoPlay attribute may not be sufficient in all cases
-    video
-      .play()
-      .then(() => {
-        console.log('[Camera] Video play() promise resolved')
-      })
-      .catch((playError) => {
-        console.error('[Camera] Video play() promise rejected:', playError)
-      })
-
-    // Cleanup: remove event listeners
     return () => {
-      video.removeEventListener('loadedmetadata', handleLoadedMetadata)
-      video.removeEventListener('canplay', handleCanPlay)
-      video.removeEventListener('playing', handlePlaying)
-      video.removeEventListener('error', handleError)
+      if (video.srcObject === stream) video.srcObject = null
     }
-  }, [status]) // Re-run when status changes (which indicates stream availability)
+  }, [status, stream])
 
-  /**
-   * Start camera and obtain MediaStream
-   */
-  const startCamera = useCallback(async () => {
+  const startCamera = useCallback(() => {
+    const liveStream = streamRef.current
+    if (
+      liveStream?.getVideoTracks().some((track) => track.readyState === 'live')
+    ) {
+      return Promise.resolve()
+    }
+
+    if (requestPromiseRef.current) return requestPromiseRef.current
+
     const requestId = ++requestIdRef.current
-
-    // Reset error state
     setError(null)
     setStatus('requesting')
+    releaseCurrentStream()
 
-    // A retry should never leave the previous stream running.
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop())
-      streamRef.current = null
-    }
+    const request = (async () => {
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error('CAMERA_NOT_SUPPORTED')
+        }
 
-    try {
-      // Check if MediaDevices API is supported
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error('NOT_SUPPORTED')
-      }
+        const nextStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: 'user',
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
+          audio: false,
+        })
 
-      // Request camera access
-      // V1: Front camera (selfie mode) at reasonable resolution
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: 'user', // Front camera on mobile
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
-        audio: false,
-      })
+        if (requestId !== requestIdRef.current) {
+          nextStream.getTracks().forEach((track) => track.stop())
+          return
+        }
 
-      // The user may have cancelled or navigated away while the permission
-      // prompt was open. Release a late stream instead of activating it.
-      if (requestId !== requestIdRef.current) {
-        stream.getTracks().forEach((track) => track.stop())
-        return
-      }
+        const videoTracks = nextStream.getVideoTracks()
+        if (
+          videoTracks.length === 0 ||
+          !videoTracks.some((track) => track.readyState === 'live')
+        ) {
+          nextStream.getTracks().forEach((track) => track.stop())
+          throw new DOMException('Camera track did not start', 'NotReadableError')
+        }
 
-      console.log('[Camera] getUserMedia success')
-      console.log('[Camera] Stream ID:', stream.id)
-      console.log('[Camera] Video tracks:', stream.getVideoTracks().map((t) => ({
-        id: t.id,
-        label: t.label,
-        readyState: t.readyState,
-        enabled: t.enabled,
-      })))
-
-      // Store stream in ref (attachment happens in useEffect)
-      streamRef.current = stream
-
-      // Transition to active state (triggers re-render with video element)
-      setStatus('active')
-    } catch (err) {
-      if (requestId !== requestIdRef.current) return
-
-      // Handle different error types
-      let cameraError: CameraError
-
-      if (err instanceof Error) {
-        const errorName = err.name
-
-        if (errorName === 'NotAllowedError' || errorName === 'PermissionDeniedError') {
-          cameraError = {
-            type: 'permission_denied',
-            message: 'Camera permission was denied',
-          }
-          setStatus('denied')
-        } else if (errorName === 'NotFoundError' || errorName === 'DevicesNotFoundError') {
-          cameraError = {
-            type: 'not_found',
-            message: 'No camera found on this device',
-          }
-          setStatus('unavailable')
-        } else if (err.message === 'NOT_SUPPORTED') {
-          cameraError = {
-            type: 'not_supported',
-            message: 'Camera is not supported in this browser',
-          }
-          setStatus('unavailable')
-        } else {
-          cameraError = {
-            type: 'unknown',
-            message: 'Failed to access camera',
-          }
+        const handleTrackEnded = () => {
+          if (streamRef.current !== nextStream) return
+          removeTrackListenersRef.current?.()
+          removeTrackListenersRef.current = null
+          nextStream.getTracks().forEach((track) => track.stop())
+          if (videoRef.current?.srcObject === nextStream) videoRef.current.srcObject = null
+          streamRef.current = null
+          setStream(null)
+          setError({
+            type: 'hardware_error',
+            message:
+              'The camera stopped unexpectedly. Check the device, then restart your camera.',
+          })
           setStatus('error')
         }
-      } else {
-        cameraError = {
-          type: 'unknown',
-          message: 'Failed to access camera',
+
+        videoTracks.forEach((track) =>
+          track.addEventListener('ended', handleTrackEnded)
+        )
+        removeTrackListenersRef.current = () => {
+          videoTracks.forEach((track) =>
+            track.removeEventListener('ended', handleTrackEnded)
+          )
         }
-        setStatus('error')
+
+        streamRef.current = nextStream
+        setStream(nextStream)
+        setStatus('active')
+      } catch (caughtError) {
+        if (requestId !== requestIdRef.current) return
+        const cameraFailure = getCameraError(caughtError)
+        setError(cameraFailure.error)
+        setStatus(cameraFailure.status)
       }
+    })()
 
-      setError(cameraError)
-      console.error('[Camera] Error accessing camera:', err)
-    }
-  }, [])
+    requestPromiseRef.current = request
+    void request.finally(() => {
+      if (requestPromiseRef.current === request) {
+        requestPromiseRef.current = null
+      }
+    })
+    return request
+  }, [releaseCurrentStream])
 
-  /**
-   * Stop camera and release MediaStream tracks
-   */
   const stopCamera = useCallback(() => {
-    // Prevent an outstanding getUserMedia request from activating later.
     requestIdRef.current += 1
-
-    if (streamRef.current) {
-      console.log('[Camera] Stopping camera stream')
-      // Stop all tracks (video and audio if any)
-      streamRef.current.getTracks().forEach((track) => track.stop())
-      streamRef.current = null
-    }
-
-    // Clear video element srcObject
-    if (videoRef.current) {
-      videoRef.current.srcObject = null
-    }
-
+    // getUserMedia prompts cannot be aborted. Keep the in-flight promise as the
+    // deduplication lock; a late stream is released by the request ID check.
+    releaseCurrentStream()
     setStatus('idle')
     setError(null)
-  }, [])
+  }, [releaseCurrentStream])
 
-  /**
-   * Cleanup on unmount: stop all tracks
-   */
   useEffect(() => {
+    const stopOnPageHide = () => stopCamera()
+    window.addEventListener('pagehide', stopOnPageHide)
     return () => {
+      window.removeEventListener('pagehide', stopOnPageHide)
       requestIdRef.current += 1
-      if (streamRef.current) {
-        console.log('[Camera] Cleanup on unmount')
-        streamRef.current.getTracks().forEach((track) => track.stop())
-        streamRef.current = null
-      }
+      removeTrackListenersRef.current?.()
+      streamRef.current?.getTracks().forEach((track) => track.stop())
+      streamRef.current = null
     }
-  }, [])
+  }, [stopCamera])
 
   return {
     status,
     error,
+    stream,
     videoRef,
     streamRef,
     startCamera,

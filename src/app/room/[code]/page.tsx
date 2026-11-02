@@ -100,7 +100,7 @@ export default async function RoomPage({ params }: RoomPageProps) {
   // Access granted - render client component with real-time subscription
   return (
     <main className="flex-1 flex flex-col items-center justify-center px-6 py-12 sm:px-12 md:px-24">
-      <div className="w-full max-w-md flex flex-col items-center gap-8">
+      <div className="flex w-full max-w-5xl flex-col items-center gap-8">
         <RoomClient
           code={code}
           initialState={accessResult.roomState}

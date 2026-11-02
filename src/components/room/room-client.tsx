@@ -4,6 +4,8 @@ import Link from 'next/link'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRoomRealtime } from '@/hooks/use-room-realtime'
 import { useSharedRoomPhotos } from '@/hooks/use-shared-room-photos'
+import { useCamera } from '@/hooks/use-camera'
+import { useRoomWebRtc } from '@/hooks/use-room-webrtc'
 import { CameraView } from '@/components/camera/camera-view'
 import { PhotoStripEditor } from '@/components/editor/photo-strip-editor'
 import {
@@ -116,6 +118,7 @@ function RoomSession({
     setActivity,
     photoSetSignal,
     subscriptionVersion,
+    signalingSignalVersion,
     markRoomEnded,
     finalization,
     markRoomFinalized,
@@ -155,6 +158,8 @@ function RoomSession({
     stickers,
     caption,
   } = usePhotoStrip()
+  const camera = useCamera()
+  const stopRoomCamera = camera.stopCamera
   const isWaiting = roomState === 'waiting'
   const isActive = roomState === 'active'
   const onlineCount = participants.length
@@ -170,8 +175,24 @@ function RoomSession({
   const [isFinalizing, setIsFinalizing] = useState(false)
   const [finalizeError, setFinalizeError] = useState<string | null>(null)
   const [finalizedAppliedId, setFinalizedAppliedId] = useState<string | null>(null)
+  const [hasLostRoomAccess, setHasLostRoomAccess] = useState(false)
   const endDialogRef = useRef<HTMLDialogElement>(null)
   const finalizeDialogRef = useRef<HTMLDialogElement>(null)
+
+  const handleWebRtcAccessLost = useCallback(() => {
+    setHasLostRoomAccess(true)
+    stopRoomCamera()
+  }, [stopRoomCamera])
+
+  const webrtc = useRoomWebRtc({
+    roomCode: code,
+    roomActive: isActive && !isFinalized && !hasLostRoomAccess,
+    enabled: camera.status === 'active',
+    localStream: camera.stream,
+    signalingSignalVersion,
+    subscriptionVersion,
+    onAccessLost: handleWebRtcAccessLost,
+  })
 
   const activity: RoomActivity =
     isFinalized
@@ -192,8 +213,13 @@ function RoomSession({
 
   useEffect(() => {
     if (!isEnded) return
+    stopRoomCamera()
     clearPhotos()
-  }, [clearPhotos, isEnded])
+  }, [clearPhotos, isEnded, stopRoomCamera])
+
+  useEffect(() => {
+    if (isFinalized) stopRoomCamera()
+  }, [isFinalized, stopRoomCamera])
 
   useEffect(() => {
     if (!isEndDialogOpen) return
@@ -415,12 +441,57 @@ function RoomSession({
       activity: onlineParticipant?.activity ?? ('idle' as RoomActivity),
     }
   })
+  const localCameraLabel = `${participant.displayName} (You)`
+  const remoteCameraLabel = getParticipantDisplayName(
+    participant.key === 'participant-1' ? 'participant-2' : 'participant-1'
+  )
   const isFinalizedResultReady = Boolean(
     finalization &&
     finalizedAppliedId === finalization.photoSetId &&
     appliedPhotoSetId === finalization.photoSetId &&
     contextPhotos.length === 4
   )
+
+  if (hasLostRoomAccess && !isEnded) {
+    return (
+      <section
+        className="flex w-full flex-col items-center gap-6 py-8 text-center"
+        aria-live="assertive"
+      >
+        <div className="flex size-16 items-center justify-center rounded-full border border-[var(--error)]/45 bg-[var(--error)]/10 text-[var(--error)]">
+          <svg
+            viewBox="0 0 32 32"
+            className="size-8"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path
+              d="M16 9V17M16 23H16.01"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+            />
+            <circle cx="16" cy="16" r="12" stroke="currentColor" strokeWidth="2" />
+          </svg>
+        </div>
+        <div className="max-w-md">
+          <h1 className="text-2xl font-bold text-[var(--text-primary)]">
+            Room access ended
+          </h1>
+          <p className="mt-3 leading-relaxed text-[var(--text-secondary)]">
+            This room expired or is no longer available. Your camera and partner
+            connection have been stopped.
+          </p>
+        </div>
+        <Link
+          href="/"
+          className="min-h-11 rounded-lg bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] px-6 py-3 font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
+        >
+          Create a new room
+        </Link>
+      </section>
+    )
+  }
 
   if (isEnded) {
     return (
@@ -680,6 +751,10 @@ function RoomSession({
         {isActive && !isFinalized && viewMode === 'camera' && (
           <div className="w-full">
             <CameraView
+              camera={camera}
+              webrtc={webrtc}
+              localLabel={localCameraLabel}
+              remoteLabel={remoteCameraLabel}
               onReviewOpen={() => setViewMode('review')}
               onPhotosReady={handlePhotosReady}
               onCaptureActivityChange={setIsCapturing}
@@ -691,6 +766,10 @@ function RoomSession({
         {!isFinalized && viewMode === 'review' && (
           <div className="w-full">
             <CameraView
+              camera={camera}
+              webrtc={webrtc}
+              localLabel={localCameraLabel}
+              remoteLabel={remoteCameraLabel}
               onEditorOpen={() => setViewMode('editor')}
               onBackToCamera={handleBackToCamera}
               onPhotosReady={handlePhotosReady}

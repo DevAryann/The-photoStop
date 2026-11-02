@@ -1,5 +1,10 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+Project deployment notes:
+
+- [Milestone 1 authoritative capture sessions](docs/AUTHORITATIVE_CAPTURE_SESSION_M1.md)
+- [Milestone 2 dual camera, secure signaling, and TURN](docs/DUAL_CAMERA_M2.md)
+
 ## Getting Started
 
 First, run the development server:

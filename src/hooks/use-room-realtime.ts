@@ -82,6 +82,7 @@ export function useRoomRealtime(
   const [retryCount, setRetryCount] = useState(0)
   const [photoSetSignal, setPhotoSetSignal] = useState<string | null>(null)
   const [subscriptionVersion, setSubscriptionVersion] = useState(0)
+  const [signalingSignalVersion, setSignalingSignalVersion] = useState(0)
   const [finalization, setFinalization] = useState<RoomFinalization | null>(
     initialFinalization
   )
@@ -244,6 +245,24 @@ export function useRoomRealtime(
           }
         }
       )
+      .on(
+        'broadcast',
+        { event: 'signal_revision' },
+        (message: { payload?: { revision?: unknown } }) => {
+          const revision = message.payload?.revision
+          if (
+            isCurrentSubscription &&
+            typeof revision === 'number' &&
+            Number.isSafeInteger(revision) &&
+            revision > 0
+          ) {
+            // The public event is only an opaque wake-up hint. Increment for
+            // every valid notification rather than comparing revisions: each
+            // participant owns a different protected inbox revision sequence.
+            setSignalingSignalVersion((current) => current + 1)
+          }
+        }
+      )
       .on('presence', { event: 'sync' }, () => syncParticipants(channel))
       .subscribe((status) => {
         if (!isCurrentSubscription) {
@@ -361,6 +380,7 @@ export function useRoomRealtime(
     setActivity,
     photoSetSignal,
     subscriptionVersion,
+    signalingSignalVersion,
     markRoomEnded,
     finalization,
     markRoomFinalized,
