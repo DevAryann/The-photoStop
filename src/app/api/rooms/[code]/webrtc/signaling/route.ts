@@ -4,6 +4,7 @@ import { hashCapability } from '@/lib/capability'
 import { isCaptureSessionPosition } from '@/lib/capture-session'
 import { authorizeRoomCapability } from '@/lib/room-validation'
 import { createAdminClient } from '@/lib/supabase/admin'
+import { hasValidWebRtcOrigin } from '@/lib/webrtc-origin'
 import { getActiveWebRtcMember } from '@/lib/webrtc-server'
 import {
   isPositiveSignalNumber,
@@ -30,11 +31,6 @@ function jsonNoStore(
     status: init?.status,
     headers: { ...noStoreHeaders, ...init?.headers },
   })
-}
-
-function hasValidOrigin(request: Request) {
-  const origin = request.headers.get('origin')
-  return !origin || origin === new URL(request.url).origin
 }
 
 async function readLimitedJson(request: Request): Promise<unknown> {
@@ -224,8 +220,21 @@ export async function GET(request: Request, context: RouteContext) {
  * enqueue one validated signal to the server-derived other room member.
  */
 export async function POST(request: Request, context: RouteContext) {
-  if (!hasValidOrigin(request)) {
-    return jsonNoStore({ error: 'Request origin is not allowed' }, { status: 403 })
+  if (!hasValidWebRtcOrigin(request)) {
+    if (process.env.NODE_ENV === 'development') {
+      // Header-only diagnostics: never log cookies, SDP, ICE, or request bodies.
+      console.warn('[WebRTC Signaling] Origin rejected:', {
+        origin: request.headers.get('origin')?.slice(0, 200) ?? null,
+        requestOrigin: new URL(request.url).origin,
+        host: request.headers.get('host')?.slice(0, 200) ?? null,
+        forwardedHost: request.headers.get('x-forwarded-host')?.slice(0, 200) ?? null,
+        forwardedProto: request.headers.get('x-forwarded-proto')?.slice(0, 200) ?? null,
+      })
+    }
+    return jsonNoStore(
+      { error: 'Request origin is not allowed', code: 'origin_not_allowed' },
+      { status: 403 }
+    )
   }
 
   let body: unknown

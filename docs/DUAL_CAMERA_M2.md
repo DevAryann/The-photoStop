@@ -99,6 +99,7 @@ into the existing photo strip, and the countdown is not synchronized.
 | `src/hooks/use-camera.ts` | Single video-only stream, permission deduplication, hardware errors, cleanup. |
 | `src/hooks/use-room-webrtc.ts` | Native peer lifecycle, negotiation, protected signaling, buffering, lease and reconnect handling. |
 | `src/lib/webrtc-signaling.ts` | Shared message types and bounded payload validation. |
+| `src/lib/webrtc-origin.ts` | Signaling CSRF origin check and development-only, same-tunnel hostname validation. |
 | `src/lib/webrtc-server.ts` | Server-derived active member and client-generation checks. |
 | `src/lib/webrtc-ice.ts` | Server-side ICE configuration and temporary coturn HMAC credentials. |
 | `src/app/api/rooms/[code]/webrtc/signaling/route.ts` | Protected inbox, claim/heartbeat/release, signal writes and acknowledgements. |
@@ -110,6 +111,7 @@ into the existing photo strip, and the countdown is not synchronized.
 | `src/components/room/room-client.tsx` | Shared camera owner and room lifecycle/access integration. |
 | `src/app/room/[code]/page.tsx` | Wider authorized room container. |
 | `scripts/test-webrtc.mjs` | Isolated signaling/ICE helper unit checks; no camera, network, DB or real secrets. |
+| `scripts/test-webrtc-origin.mjs` | Isolated origin, signaling route authorization, and terminal rejection/reconnect tests. |
 | `.env.example`, `README.md`, `docs/DUAL_CAMERA_M2.md` | Configuration and deployment/report documentation. |
 
 ## Environment variables
@@ -137,6 +139,95 @@ WEBRTC_ICE_TRANSPORT_POLICY=all
 The example public STUN hostname is not a connectivity guarantee or a TURN
 service. Production deployments should set `WEBRTC_ALLOW_STUN_ONLY=false` and
 configure TURN.
+
+## Development HTTPS / Cloudflare Quick Tunnel
+
+### Exact origin rejection
+
+`POST /api/rooms/[code]/webrtc/signaling` produces
+`Request origin is not allowed` (HTTP 403). Its original local `hasValidOrigin()`
+checked only `Origin === new URL(request.url).origin`. This is an application
+CSRF check, separate from Next.js `allowedDevOrigins`, which protects dev-only
+assets/endpoints. There is no middleware/proxy or origin environment allowlist
+in this application overriding the signaling check.
+
+The failing request on initial camera sharing is the **claim POST**, after the
+capture-session request but before ICE configuration or peer creation. Every
+later signaling POST action uses the same origin gate. A controlled Next.js
+16.3.1 dev-server HTTP reproduction (not a physical-phone capture) observed:
+
+| Value | Preserved Host | Locally rewritten Host |
+| --- | --- | --- |
+| Browser `Origin` | `https://random-quick-tunnel.trycloudflare.com` | Same |
+| `Host` | `random-quick-tunnel.trycloudflare.com` | `127.0.0.1:3100` |
+| `X-Forwarded-Host` | `random-quick-tunnel.trycloudflare.com` | Same |
+| `X-Forwarded-Proto` | `https` | Same |
+| Next route `request.url` origin | `https://localhost:3100` | Same |
+| Original response | 403 | 403 |
+
+Next constructs this internal request URL from its server metadata, not the
+public tunnel Host. The random hostname was therefore rejected by the strict
+equality comparison, despite `*.trycloudflare.com` already being present in
+`next.config.ts`.
+
+The fix keeps exact request-URL origin matching in all environments, and adds
+one development-only exception: a canonical HTTPS origin on a single valid DNS
+label immediately beneath **`.trycloudflare.com`**, with no non-default port.
+It must match the public Host and any supplied forwarded Host. If a local proxy
+rewrites Host, its backend hostname/port must match the request backend (or a
+loopback hostname) and its single forwarded Host must match the tunnel origin.
+The forwarded protocol must be exactly `https`. Other tunnel origins, arbitrary
+public Hosts, lookalikes, origin/forwarding lists, userinfo, and malformed URLs
+are rejected. Production never uses this forwarded-header exception.
+
+Rejections include `code: "origin_not_allowed"`. The hook treats that as a
+terminal configuration error, closes the peer, and stops that run's polling,
+acknowledgements, heartbeats, and ICE retries. Initial claims were not retried
+automatically, but an established peer could keep retrying rejected writes or
+show reconnecting after the rejection. Explicit **Reconnect** starts a fresh
+generation after the policy is fixed; local camera ownership is unchanged.
+
+### Configuration and laptop-to-phone test
+
+1. Keep the existing development-only `allowedDevOrigins` entry
+   `"*.trycloudflare.com"` in `next.config.ts`. **No new origin environment
+   variable is required.** Run `npm run dev`; `npm run build` / `npm start` use
+   production security and do not enable the tunnel exception.
+2. Keep Supabase configured and the existing migrations applied. For a local
+   STUN-only test, use the documented `WEBRTC_STUN_URLS`,
+   `WEBRTC_ALLOW_STUN_ONLY=true`, and `WEBRTC_ICE_TRANSPORT_POLICY=all`, or use a
+   configured TURN server. Do not change any capability-cookie settings.
+3. Start one tunnel:
+
+   ```bash
+   cloudflared tunnel --url http://localhost:3000
+   ```
+
+   Cloudflare normally preserves the public Host and forwards HTTPS protocol
+   information. If another proxy is involved, preserve those headers as described
+   above; do not forward comma-separated host/protocol chains.
+4. Open the **same generated HTTPS URL** on both devices. Create a new room on
+   the laptop and join normally with its room code on the phone, obtaining two
+   independent HttpOnly capabilities. A localhost cookie does not carry over to
+   the tunnel; if its hostname rotates, open the new URL and create/join again.
+5. Choose **Share My Camera** on both. In browser Network tools (remote-inspect
+   the phone if needed), filter `webrtc/signaling`. Confirm claim POSTs return
+   200, signal POSTs return 200/201, inbox GETs and ack/heartbeat POSTs return
+   200, and both partner previews become connected. Confirm the browser Origin
+   is the shared HTTPS tunnel origin. Refresh/re-share or choose **Reconnect**
+   to verify recovery without repeated 403s.
+6. For a negative check, replay a JSON signaling request with an unrelated
+   Origin, another tunnel Origin, or `https://<tunnel>.evil.example`; expect
+   403 / `origin_not_allowed`. An allowed-origin claim **without a cookie** must
+   still return 401, never grant a lease. Development rejection logs show only
+   bounded Origin/request-origin/Host/forwarded-header values, not cookies or
+   SDP/ICE. These diagnostics are disabled in production.
+
+Cloudflare's HTTPS tunnel carries the web app and HTTP signaling, **not WebRTC
+media**. The current local configuration uses explicit STUN-only fallback;
+Wi-Fi-to-cellular or restrictive NATs may still need TURN after origin rejection
+is fixed. Use the TURN test matrix below to distinguish an ICE connectivity
+failure from an HTTP 403.
 
 ## coturn-compatible TURN setup
 
@@ -205,9 +296,10 @@ API.
 - Strict generation/sequence checks prevent stale tabs and replayed writes.
   Identical response-loss retries are safe; conflicting sequence reuse fails.
 - POST rejects mismatched Origin headers and requires application/json; the
-  existing HttpOnly/SameSite capability cookie is the credential. API responses
-  use private/no-store caching. Client-supplied relational IDs never authorize a
-  signal, a recipient or an acknowledgement.
+  only development exception is the validated same-HTTPS-Quick-Tunnel authority
+  described above. The existing HttpOnly/SameSite capability cookie is the
+  credential. API responses use private/no-store caching. Client-supplied
+  relational IDs never authorize a signal, a recipient or an acknowledgement.
 - Presence is used only for friendly online/activity UI. It never authorizes a
   connection or determines the signaling recipient.
 - Protected polling is intentional: Realtime is latency optimization, not a
@@ -231,6 +323,7 @@ Run from the repository root:
 
 ```bash
 node scripts/test-webrtc.mjs
+node scripts/test-webrtc-origin.mjs
 npx tsc --noEmit
 npm run build
 npm run lint
@@ -240,6 +333,10 @@ git diff --check
 The helper tests cover UUID/generation bounds, SDP and ICE validation, inbox
 metadata, restart payloads, explicit STUN fallback, coturn HMAC/randomness,
 credential lifetime clamping, relay mode, and invalid configuration rejection.
+Origin tests additionally cover accepted/rejected origins in isolated development
+and production environments, exact domain boundaries and malicious lookalikes,
+spoofed/ambiguous forwarded headers, retained capability/participant/JSON checks,
+and terminal claim/signal/ack/heartbeat rejection plus explicit reconnect.
 They do not validate native browser negotiation, database RPC execution, or real
 TURN allocations.
 
@@ -248,9 +345,11 @@ Implementation validation results:
 | Check | Result |
 | --- | --- |
 | `node scripts/test-webrtc.mjs` | Passed: 10 helper test groups. |
+| `node scripts/test-webrtc-origin.mjs` | Passed: 14 origin/route/recovery test groups. |
 | `npx tsc --noEmit` | Passed. |
 | `npm run build` | Passed; both protected WebRTC API routes included. |
 | `npm run lint` | Passed with 0 errors and 156 existing warnings outside changed implementation files. |
+| Controlled Next dev/production HTTP origin checks | Passed: valid dev tunnel layouts reach capability authorization (401 without a cookie); lookalikes/conflicting authorities and production tunnel exceptions remain 403. No CORS allow-origin header added. |
 | Changed-file ESLint | Clean. |
 | `git diff --check` | Passed; only Windows LF/CRLF notices. |
 

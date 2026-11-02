@@ -349,6 +349,27 @@ export function useRoomWebRtc({
     [closePeerConnection, setLiveError, setLiveStatus]
   )
 
+  const handleOriginRejected = useCallback(
+    (message: string) => {
+      // A policy rejection is not a temporary network outage. Stop this run,
+      // including inbox/ack retries, heartbeats, and automatic ICE restarts.
+      runIdRef.current += 1
+      signalingBrokenRef.current = true
+      fetchControllersRef.current.forEach((controller) => controller.abort())
+      closePeerConnection()
+      leaseRef.current = null
+      setLeaseEpoch((current) => current + 1)
+      setLiveStatus('disconnected')
+      setLiveError({
+        code: 'configuration',
+        message: `${message}. Use the same allowed HTTPS app URL on both devices, then reconnect after the server configuration is fixed.`,
+      })
+      // A release POST would be rejected too. The server lease expires normally;
+      // explicit reconnect force-claims a fresh generation after the policy fix.
+    },
+    [closePeerConnection, setLiveError, setLiveStatus]
+  )
+
   const releaseLease = useCallback(
     (lease: RoomWebRtcLease, useBeacon = false) => {
       const body = JSON.stringify({
@@ -441,6 +462,13 @@ export function useRoomWebRtc({
         signalingBrokenRef.current = true
         if (
           caughtError instanceof RoomWebRtcRequestError &&
+          caughtError.code === 'origin_not_allowed'
+        ) {
+          handleOriginRejected(caughtError.message)
+          return
+        }
+        if (
+          caughtError instanceof RoomWebRtcRequestError &&
           caughtError.status === 401
         ) {
           handleAccessLost()
@@ -469,6 +497,7 @@ export function useRoomWebRtc({
     [
       handleAccessLost,
       handleLeaseLost,
+      handleOriginRejected,
       postAction,
       setLiveError,
       setLiveStatus,
@@ -875,6 +904,13 @@ export function useRoomWebRtc({
             await acknowledgeMessages(acknowledge)
           } catch (caughtError) {
             if (!isCurrent()) return
+            if (
+              caughtError instanceof RoomWebRtcRequestError &&
+              caughtError.code === 'origin_not_allowed'
+            ) {
+              handleOriginRejected(caughtError.message)
+              return
+            }
             // A later protected read safely retries the acknowledgement.
             if (
               caughtError instanceof RoomWebRtcRequestError &&
@@ -900,6 +936,13 @@ export function useRoomWebRtc({
         caughtError instanceof DOMException &&
         caughtError.name === 'AbortError'
       ) {
+        return
+      }
+      if (
+        caughtError instanceof RoomWebRtcRequestError &&
+        caughtError.code === 'origin_not_allowed'
+      ) {
+        handleOriginRejected(caughtError.message)
         return
       }
       if (
@@ -932,6 +975,7 @@ export function useRoomWebRtc({
     acknowledgeMessages,
     handleAccessLost,
     handleLeaseLost,
+    handleOriginRejected,
     processInboxMessage,
     requestJson,
     setLiveError,
@@ -1232,6 +1276,13 @@ export function useRoomWebRtc({
         }
         if (
           caughtError instanceof RoomWebRtcRequestError &&
+          caughtError.code === 'origin_not_allowed'
+        ) {
+          handleOriginRejected(caughtError.message)
+          return
+        }
+        if (
+          caughtError instanceof RoomWebRtcRequestError &&
           caughtError.status === 401
         ) {
           handleAccessLost()
@@ -1264,6 +1315,7 @@ export function useRoomWebRtc({
       closePeerConnection,
       createPeerConnection,
       handleAccessLost,
+      handleOriginRejected,
       releaseLease,
       requestJson,
       roomCode,
@@ -1326,6 +1378,13 @@ export function useRoomWebRtc({
         if (runId !== runIdRef.current || leaseRef.current !== activeLease) return
         if (
           caughtError instanceof RoomWebRtcRequestError &&
+          caughtError.code === 'origin_not_allowed'
+        ) {
+          handleOriginRejected(caughtError.message)
+          return
+        }
+        if (
+          caughtError instanceof RoomWebRtcRequestError &&
           caughtError.status === 409
         ) {
           handleLeaseLost(caughtError.message)
@@ -1374,6 +1433,7 @@ export function useRoomWebRtc({
   }, [
     handleAccessLost,
     handleLeaseLost,
+    handleOriginRejected,
     leaseEpoch,
     postAction,
   ])
