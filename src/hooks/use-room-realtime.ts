@@ -83,6 +83,7 @@ export function useRoomRealtime(
   const [photoSetSignal, setPhotoSetSignal] = useState<string | null>(null)
   const [subscriptionVersion, setSubscriptionVersion] = useState(0)
   const [signalingSignalVersion, setSignalingSignalVersion] = useState(0)
+  const [captureSignalVersion, setCaptureSignalVersion] = useState(0)
   const [finalization, setFinalization] = useState<RoomFinalization | null>(
     initialFinalization
   )
@@ -207,6 +208,24 @@ export function useRoomRealtime(
       .channel(`room:${roomCode}`, {
         config: { presence: { key: participant.key } },
       })
+      .on(
+        'broadcast',
+        { event: 'capture_state_changed' },
+        (message: { payload?: { sessionId?: unknown; revision?: unknown } }) => {
+          const { sessionId, revision } = message.payload ?? {}
+          if (
+            isCurrentSubscription &&
+            typeof sessionId === 'string' &&
+            typeof revision === 'number' &&
+            Number.isSafeInteger(revision) &&
+            revision > 0
+          ) {
+            // Opaque wake-up only. Protected state remains authoritative and
+            // duplicate delivery is harmless because clients re-fetch it.
+            setCaptureSignalVersion((current) => current + 1)
+          }
+        }
+      )
       .on(
         'broadcast',
         { event: 'state_change' },
@@ -381,6 +400,7 @@ export function useRoomRealtime(
     photoSetSignal,
     subscriptionVersion,
     signalingSignalVersion,
+    captureSignalVersion,
     markRoomEnded,
     finalization,
     markRoomFinalized,

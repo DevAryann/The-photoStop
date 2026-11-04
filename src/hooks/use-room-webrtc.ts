@@ -52,6 +52,11 @@ export interface UseRoomWebRtcReturn {
   error: RoomWebRtcError | null
   remoteStream: MediaStream | null
   participantPosition: CaptureSessionPosition | null
+  clientLease: {
+    clientId: string
+    generation: number
+    expiresAt: string
+  } | null
   reconnect: () => void
 }
 
@@ -133,6 +138,7 @@ export function useRoomWebRtc({
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
   const [participantPosition, setParticipantPosition] =
     useState<CaptureSessionPosition | null>(null)
+  const [clientLease, setClientLease] = useState<RoomWebRtcLease | null>(null)
   const [leaseEpoch, setLeaseEpoch] = useState(0)
 
   const mountedRef = useRef(true)
@@ -322,6 +328,7 @@ export function useRoomWebRtc({
     fetchControllersRef.current.forEach((controller) => controller.abort())
     closePeerConnection()
     leaseRef.current = null
+    setClientLease(null)
     setLiveStatus('disconnected')
     setLiveError({
       code: 'access_lost',
@@ -337,6 +344,7 @@ export function useRoomWebRtc({
       fetchControllersRef.current.forEach((controller) => controller.abort())
       closePeerConnection()
       leaseRef.current = null
+      setClientLease(null)
       setLiveStatus('disconnected')
       setLiveError({
         code: 'lease_lost',
@@ -358,6 +366,7 @@ export function useRoomWebRtc({
       fetchControllersRef.current.forEach((controller) => controller.abort())
       closePeerConnection()
       leaseRef.current = null
+      setClientLease(null)
       setLeaseEpoch((current) => current + 1)
       setLiveStatus('disconnected')
       setLiveError({
@@ -1185,6 +1194,7 @@ export function useRoomWebRtc({
 
       const previousLease = leaseRef.current
       leaseRef.current = null
+      setClientLease(null)
       fetchControllersRef.current.forEach((controller) => controller.abort())
       fetchControllersRef.current.clear()
       if (previousLease && !force) releaseLease(previousLease)
@@ -1252,6 +1262,7 @@ export function useRoomWebRtc({
         }
 
         leaseRef.current = lease
+        setClientLease(lease)
         claimedLease = null
         nextSequenceRef.current = lease.nextSequence
         iceConfigurationRef.current = iceValue
@@ -1265,6 +1276,7 @@ export function useRoomWebRtc({
         const activeLease = leaseRef.current
         if (activeLease) {
           leaseRef.current = null
+          setClientLease(null)
           releaseLease(activeLease)
           closePeerConnection()
         }
@@ -1335,6 +1347,7 @@ export function useRoomWebRtc({
       closePeerConnection()
       const lease = leaseRef.current
       leaseRef.current = null
+      setClientLease(null)
       if (lease && release) releaseLease(lease)
       signalingBrokenRef.current = false
       signalQueueRef.current = Promise.resolve()
@@ -1347,6 +1360,8 @@ export function useRoomWebRtc({
 
   useEffect(() => {
     if (enabled && roomActive && localStream) {
+      // Connection setup is the external system synchronized by this effect.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       void startConnection(false)
       return () => stopConnection(true)
     }
@@ -1488,6 +1503,7 @@ export function useRoomWebRtc({
     error,
     remoteStream,
     participantPosition,
+    clientLease,
     reconnect,
   }
 }

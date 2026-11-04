@@ -7,6 +7,7 @@ import { useSharedRoomPhotos } from '@/hooks/use-shared-room-photos'
 import { useCamera } from '@/hooks/use-camera'
 import { useRoomWebRtc } from '@/hooks/use-room-webrtc'
 import { CameraView } from '@/components/camera/camera-view'
+import { SynchronizedCaptureView } from '@/components/camera/synchronized-capture-view'
 import { PhotoStripEditor } from '@/components/editor/photo-strip-editor'
 import {
   PhotoStripProvider,
@@ -119,6 +120,7 @@ function RoomSession({
     photoSetSignal,
     subscriptionVersion,
     signalingSignalVersion,
+    captureSignalVersion,
     markRoomEnded,
     finalization,
     markRoomFinalized,
@@ -166,6 +168,7 @@ function RoomSession({
 
   // Local state for view mode: 'camera' (idle/capturing), 'review' (4 photos), 'editor'
   const [viewMode, setViewMode] = useState<'camera' | 'review' | 'editor'>('camera')
+  const [captureExperience, setCaptureExperience] = useState<'synchronized' | 'classic'>('synchronized')
   const [isCapturing, setIsCapturing] = useState(false)
   const [appliedPhotoSetId, setAppliedPhotoSetId] = useState<string | null>(null)
   const [isEndDialogOpen, setIsEndDialogOpen] = useState(false)
@@ -749,16 +752,54 @@ function RoomSession({
 
         {/* Camera View - Only shown when room is active and in camera mode */}
         {isActive && !isFinalized && viewMode === 'camera' && (
-          <div className="w-full">
-            <CameraView
-              camera={camera}
-              webrtc={webrtc}
-              localLabel={localCameraLabel}
-              remoteLabel={remoteCameraLabel}
-              onReviewOpen={() => setViewMode('review')}
-              onPhotosReady={handlePhotosReady}
-              onCaptureActivityChange={setIsCapturing}
-            />
+          <div className="flex w-full flex-col gap-5">
+            <div className="flex w-full items-center justify-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1" role="group" aria-label="Capture experience">
+              <button
+                type="button"
+                onClick={() => {
+                  if (captureExperience !== 'synchronized') camera.stopCamera()
+                  setCaptureExperience('synchronized')
+                }}
+                aria-pressed={captureExperience === 'synchronized'}
+                className={`min-h-11 flex-1 rounded-md px-3 text-sm font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] ${captureExperience === 'synchronized' ? 'bg-[var(--canvas)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
+              >
+                Together · 6 moments
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (captureExperience !== 'classic') camera.stopCamera()
+                  setCaptureExperience('classic')
+                }}
+                aria-pressed={captureExperience === 'classic'}
+                className={`min-h-11 flex-1 rounded-md px-3 text-sm font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] ${captureExperience === 'classic' ? 'bg-[var(--canvas)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
+              >
+                Classic · 4 photos
+              </button>
+            </div>
+
+            {captureExperience === 'synchronized' ? (
+              <SynchronizedCaptureView
+                roomCode={code}
+                camera={camera}
+                webrtc={webrtc}
+                localLabel={localCameraLabel}
+                remoteLabel={remoteCameraLabel}
+                captureSignalVersion={captureSignalVersion}
+                subscriptionVersion={subscriptionVersion}
+                onCaptureActivityChange={setIsCapturing}
+              />
+            ) : (
+              <CameraView
+                camera={camera}
+                webrtc={webrtc}
+                localLabel={localCameraLabel}
+                remoteLabel={remoteCameraLabel}
+                onReviewOpen={() => setViewMode('review')}
+                onPhotosReady={handlePhotosReady}
+                onCaptureActivityChange={setIsCapturing}
+              />
+            )}
           </div>
         )}
 

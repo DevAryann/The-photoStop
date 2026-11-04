@@ -5,9 +5,15 @@ import {
   parseAuthoritativeCaptureSession,
   type AuthoritativeCaptureSession,
 } from '@/lib/capture-session'
+import {
+  broadcastCaptureState,
+  loadSynchronizedCaptureState,
+} from '@/lib/capture-session-server'
 import { isValidRoomCodeFormat } from '@/lib/room-code'
 import { authorizeRoomCapability } from '@/lib/room-validation'
 import { createAdminClient } from '@/lib/supabase/admin'
+import { hasValidWebRtcOrigin } from '@/lib/webrtc-origin'
+import { isPositiveSignalNumber, isUuid } from '@/lib/webrtc-signaling'
 
 interface RouteContext {
   params: Promise<{ code: string }>
@@ -55,7 +61,7 @@ async function serializeCaptureSession(
 }
 
 /** Fetch the current authoritative capture session without creating one. */
-export async function GET(_request: Request, context: RouteContext) {
+export async function GET(request: Request, context: RouteContext) {
   const { code } = await context.params
   const cookieStore = await cookies()
   const capability = cookieStore.get('session_capability')?.value
@@ -68,6 +74,22 @@ export async function GET(_request: Request, context: RouteContext) {
       { error: 'Room access is unavailable' },
       { status: 401 }
     )
+  }
+
+  if (new URL(request.url).searchParams.get('clock') === '1') {
+    const supabase = createAdminClient()
+    const { data: serverTime, error } = await supabase.rpc(
+      'get_synchronized_capture_server_time',
+      {
+        p_room_code: code,
+        p_capability_hash: hashCapability(capability!),
+      }
+    )
+    const serverTimeMs = Date.parse(String(serverTime))
+    if (error || !Number.isFinite(serverTimeMs)) {
+      return jsonNoStore({ error: 'Server time is unavailable' }, { status: 503 })
+    }
+    return jsonNoStore({ serverTimeMs })
   }
 
   const supabase = createAdminClient()
@@ -128,7 +150,19 @@ export async function GET(_request: Request, context: RouteContext) {
     )
   }
 
-  return jsonNoStore({ session })
+  const capture = await loadSynchronizedCaptureState({
+    roomCode: code,
+    capability: capability!,
+    access,
+  })
+  if (!capture) {
+    return jsonNoStore(
+      { error: 'The synchronized capture state could not be loaded' },
+      { status: 503 }
+    )
+  }
+
+  return jsonNoStore({ session, capture })
 }
 
 /** Atomically create, or idempotently obtain, the room capture session. */
@@ -212,4 +246,111 @@ export async function POST(_request: Request, context: RouteContext) {
     { session, created: result.was_created },
     { status: result.was_created ? 201 : 200 }
   )
+}
+
+/** Mutate readiness or recover an expired attempt using the active tab lease. */
+export async function PATCH(request: Request, context: RouteContext) {
+  const { code } = await context.params
+  if (!hasValidWebRtcOrigin(request)) {
+    return jsonNoStore(
+      { error: 'Request origin is not allowed', code: 'origin_not_allowed' },
+      { status: 403 }
+    )
+  }
+
+  if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) {
+    return jsonNoStore({ error: 'JSON is required' }, { status: 415 })
+  }
+
+  const cookieStore = await cookies()
+  const capability = cookieStore.get('session_capability')?.value
+  const access = capability
+    ? await authorizeRoomCapability(code, capability)
+    : null
+  if (!access || !capability || access.roomState !== 'active' || access.finalization) {
+    return jsonNoStore({ error: 'Room access is unavailable' }, { status: 401 })
+  }
+
+  let body: {
+    action?: unknown
+    clientId?: unknown
+    generation?: unknown
+  }
+  try {
+    body = await request.json()
+  } catch {
+    return jsonNoStore({ error: 'Invalid capture request' }, { status: 400 })
+  }
+
+  if (
+    (body.action !== 'ready' &&
+      body.action !== 'not_ready' &&
+      body.action !== 'restart') ||
+    !isUuid(body.clientId) ||
+    !isPositiveSignalNumber(body.generation)
+  ) {
+    return jsonNoStore({ error: 'Invalid capture request' }, { status: 400 })
+  }
+
+  const supabase = createAdminClient()
+  const rpc =
+    body.action === 'restart'
+      ? supabase.rpc('restart_synchronized_capture_attempt', {
+          p_room_code: code,
+          p_capability_hash: hashCapability(capability),
+          p_client_id: body.clientId,
+          p_generation: body.generation,
+        })
+      : supabase.rpc('set_synchronized_capture_readiness', {
+          p_room_code: code,
+          p_capability_hash: hashCapability(capability),
+          p_client_id: body.clientId,
+          p_generation: body.generation,
+          p_is_ready: body.action === 'ready',
+        })
+
+  const { error } = await rpc
+  if (error) {
+    if (error.message?.includes('capture_client_lease_lost')) {
+      return jsonNoStore(
+        { error: 'This tab no longer owns the camera session', code: 'lease_lost' },
+        { status: 409 }
+      )
+    }
+    if (
+      error.message?.includes('capture_attempt_not_restartable') ||
+      error.message?.includes('capture_retry_only_missing_participant') ||
+      error.message?.includes('room_access_denied')
+    ) {
+      return jsonNoStore(
+        { error: 'The capture state changed. Refresh and try again.' },
+        { status: 409 }
+      )
+    }
+    console.error('[Synchronized Capture] Mutation failed:', error)
+    return jsonNoStore(
+      { error: 'The capture session could not be updated' },
+      { status: 503 }
+    )
+  }
+
+  const capture = await loadSynchronizedCaptureState({
+    roomCode: code,
+    capability,
+    access,
+  })
+  if (!capture) {
+    return jsonNoStore(
+      { error: 'The synchronized capture state could not be loaded' },
+      { status: 503 }
+    )
+  }
+
+  try {
+    await broadcastCaptureState(code, capture)
+  } catch (broadcastError) {
+    console.error('[Synchronized Capture] Invalidation broadcast failed:', broadcastError)
+  }
+
+  return jsonNoStore({ capture })
 }

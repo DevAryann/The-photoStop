@@ -13,6 +13,7 @@ interface DualCameraStageProps {
   connectionError: RoomWebRtcError | null
   localLabel: string
   remoteLabel: string
+  variant?: 'focus' | 'paired'
   children?: ReactNode
 }
 
@@ -67,6 +68,7 @@ export function DualCameraStage({
   connectionError,
   localLabel,
   remoteLabel,
+  variant = 'focus',
   children,
 }: DualCameraStageProps) {
   const remoteVideoRef = useRef<HTMLVideoElement>(null)
@@ -81,6 +83,53 @@ export function DualCameraStage({
       if (video.srcObject === remoteStream) video.srcObject = null
     }
   }, [remoteStream])
+
+  if (variant === 'paired') {
+    return (
+      <div className="relative grid w-full grid-cols-2 gap-2 overflow-hidden rounded-xl bg-[#070a0f] p-2 shadow-[0_24px_70px_-34px_rgba(255,74,125,0.45)] sm:gap-3 sm:p-3">
+        <div className="relative aspect-[3/4] overflow-hidden rounded-lg bg-[var(--canvas)] sm:aspect-[4/3]">
+          <video
+            ref={localVideoRef}
+            autoPlay
+            playsInline
+            muted
+            aria-label={`${localLabel} camera preview`}
+            className="h-full w-full -scale-x-100 object-cover"
+          />
+          <span className="absolute bottom-2 left-2 max-w-[calc(100%-1rem)] truncate rounded bg-black/70 px-2 py-1 text-xs font-semibold text-white">
+            {localLabel}
+          </span>
+        </div>
+
+        <div className="relative aspect-[3/4] overflow-hidden rounded-lg bg-[var(--canvas)] sm:aspect-[4/3]">
+          {remoteStream ? (
+            <video
+              ref={remoteVideoRef}
+              autoPlay
+              playsInline
+              muted
+              aria-label={`${remoteLabel} live camera`}
+              className="h-full w-full object-cover"
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center bg-[linear-gradient(145deg,#101722_0%,#090d14_70%)] px-4 text-center">
+              <p className="text-sm font-medium text-[var(--text-secondary)]">
+                {getEmptyStateCopy(connectionStatus, connectionError)}
+              </p>
+            </div>
+          )}
+          <span className="absolute bottom-2 left-2 max-w-[calc(100%-1rem)] truncate rounded bg-black/70 px-2 py-1 text-xs font-semibold text-white">
+            {remoteLabel}
+          </span>
+          <span className="absolute top-2 right-2 flex items-center gap-1.5 rounded-full bg-black/70 px-2 py-1 text-[0.6875rem] font-semibold text-white">
+            <span className={`size-1.5 rounded-full ${statusDetails.dotClassName}`} aria-hidden="true" />
+            {statusDetails.label}
+          </span>
+        </div>
+        {children}
+      </div>
+    )
+  }
 
   return (
     <div className="relative aspect-[4/3] w-full overflow-hidden rounded-xl border border-[var(--border-active)] bg-[#070a0f] shadow-[0_24px_70px_-34px_rgba(255,74,125,0.45)] sm:aspect-video">

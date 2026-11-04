@@ -5,6 +5,7 @@ export const CAPTURE_SESSION_PHASES = [
   'preparing',
   'countdown',
   'capturing',
+  'completed',
   'selecting',
   'editing',
   'finalizing',
@@ -13,6 +14,167 @@ export const CAPTURE_SESSION_PHASES = [
 
 export type CaptureSessionPhase = (typeof CAPTURE_SESSION_PHASES)[number]
 export type CaptureSessionPosition = 'A' | 'B'
+
+export const CAPTURE_UPLOAD_STATUSES = [
+  'reserved',
+  'uploading',
+  'uploaded',
+  'verified',
+  'failed',
+] as const
+
+export type CaptureUploadStatus = (typeof CAPTURE_UPLOAD_STATUSES)[number]
+export type SynchronizedCaptureUiState =
+  | 'waiting_participants'
+  | 'waiting_readiness'
+  | 'scheduled'
+  | 'countdown'
+  | 'capturing'
+  | 'uploading'
+  | 'waiting_partner_upload'
+  | 'moment_completed'
+  | 'session_completed'
+  | 'recoverable_failure'
+
+export interface CaptureMemberState {
+  position: CaptureSessionPosition
+  ready: boolean
+  connected: boolean
+}
+
+export interface CapturePhotoState {
+  position: CaptureSessionPosition
+  status: CaptureUploadStatus
+  capturedAt: string | null
+  previewUrl?: string
+}
+
+export interface CaptureAttemptState {
+  attemptId: string
+  attemptNumber: number
+  scheduledAt: string
+  resultState: 'pending' | 'partial' | 'complete'
+  photos: CapturePhotoState[]
+}
+
+export interface SynchronizedCaptureMomentState {
+  captureIndex: number
+  status: 'pending' | 'active' | 'complete'
+  attempt: CaptureAttemptState | null
+}
+
+export interface SynchronizedCaptureState {
+  sessionId: string
+  phase: CaptureSessionPhase
+  revision: number
+  participantPosition: CaptureSessionPosition
+  serverTimeMs: number
+  members: CaptureMemberState[]
+  moments: SynchronizedCaptureMomentState[]
+  currentMoment: number | null
+  currentAttempt: CaptureAttemptState | null
+  completedMomentCount: number
+}
+
+export interface ServerClockSample {
+  clientWallSendMs: number
+  clientWallReceiveMs: number
+  serverTimeMs: number
+}
+
+export interface ServerClockEstimate {
+  offsetMs: number
+  roundTripMs: number
+  sampledAtClientWallMs: number
+}
+
+/**
+ * NTP-style midpoint estimation. The lowest-latency samples are least affected
+ * by asymmetric request delay; weighting up to the best three reduces jitter.
+ */
+export function estimateServerClock(
+  samples: ServerClockSample[]
+): ServerClockEstimate | null {
+  const valid = samples
+    .filter(
+      (sample) =>
+        Number.isFinite(sample.clientWallSendMs) &&
+        Number.isFinite(sample.clientWallReceiveMs) &&
+        Number.isFinite(sample.serverTimeMs) &&
+        sample.clientWallReceiveMs >= sample.clientWallSendMs
+    )
+    .map((sample) => {
+      const roundTripMs = sample.clientWallReceiveMs - sample.clientWallSendMs
+      const midpoint = sample.clientWallSendMs + roundTripMs / 2
+      return {
+        offsetMs: sample.serverTimeMs - midpoint,
+        roundTripMs,
+        sampledAtClientWallMs: sample.clientWallReceiveMs,
+      }
+    })
+    .sort((left, right) => left.roundTripMs - right.roundTripMs)
+    .slice(0, 3)
+
+  if (valid.length === 0) return null
+
+  let totalWeight = 0
+  let weightedOffset = 0
+  for (const sample of valid) {
+    const weight = 1 / Math.max(1, sample.roundTripMs)
+    totalWeight += weight
+    weightedOffset += sample.offsetMs * weight
+  }
+
+  return {
+    offsetMs: weightedOffset / totalWeight,
+    roundTripMs: valid[0].roundTripMs,
+    sampledAtClientWallMs: Math.max(
+      ...valid.map((sample) => sample.sampledAtClientWallMs)
+    ),
+  }
+}
+
+/** Convert a server wall-clock deadline into this document's monotonic clock. */
+export function getMonotonicCaptureDeadline(
+  scheduledServerTimeMs: number,
+  clock: ServerClockEstimate,
+  clientWallNowMs: number,
+  performanceNowMs: number
+) {
+  const localWallDeadline = scheduledServerTimeMs - clock.offsetMs
+  return performanceNowMs + (localWallDeadline - clientWallNowMs)
+}
+
+export function shouldScheduleAttempt(
+  handledAttemptId: string | null,
+  attemptId: string,
+  ownUploadStatus: CaptureUploadStatus
+) {
+  return handledAttemptId !== attemptId && ownUploadStatus !== 'verified'
+}
+
+export function isSynchronizedCaptureState(
+  value: unknown
+): value is SynchronizedCaptureState {
+  if (!value || typeof value !== 'object') return false
+  const state = value as Partial<SynchronizedCaptureState>
+  return (
+    typeof state.sessionId === 'string' &&
+    UUID_PATTERN.test(state.sessionId) &&
+    isCaptureSessionPhase(state.phase) &&
+    typeof state.revision === 'number' &&
+    Number.isInteger(state.revision) &&
+    state.revision > 0 &&
+    isCaptureSessionPosition(state.participantPosition) &&
+    typeof state.serverTimeMs === 'number' &&
+    Number.isFinite(state.serverTimeMs) &&
+    Array.isArray(state.members) &&
+    state.members.length === 2 &&
+    Array.isArray(state.moments) &&
+    state.moments.length === CAPTURE_MOMENT_COUNT &&
+    typeof state.completedMomentCount === 'number'
+  )
+}
 
 export interface CaptureMomentSummary {
   captureIndex: number

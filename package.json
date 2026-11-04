@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:capture": "node scripts/test-synchronized-capture.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.5",
