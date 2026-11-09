@@ -92,6 +92,34 @@ export async function GET(request: Request, context: RouteContext) {
     return jsonNoStore({ serverTimeMs })
   }
 
+  // Capture clients already own the durable session descriptor. This focused
+  // path avoids repeating its session/member/moment queries on every Realtime
+  // invalidation and recovery poll.
+  if (new URL(request.url).searchParams.get('capture') === '1') {
+    const startedAt = performance.now()
+    const capture = await loadSynchronizedCaptureState({
+      roomCode: code,
+      capability: capability!,
+      access,
+    })
+    if (!capture) {
+      return jsonNoStore(
+        { error: 'The synchronized capture state could not be loaded' },
+        { status: 503 }
+      )
+    }
+    const stateLoadMs = performance.now() - startedAt
+    return NextResponse.json(
+      { capture },
+      {
+        headers: {
+          ...noStoreHeaders,
+          'Server-Timing': `capture-state;dur=${stateLoadMs.toFixed(2)}`,
+        },
+      }
+    )
+  }
+
   const supabase = createAdminClient()
   const { data: captureSession, error: sessionError } = await supabase
     .from('room_capture_sessions')

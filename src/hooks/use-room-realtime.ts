@@ -18,6 +18,7 @@ import {
   isRoomFinalization,
   type RoomFinalization,
 } from '@/lib/photo-strip-finalization'
+import { isUuid } from '@/lib/webrtc-signaling'
 
 export type RoomPresenceStatus =
   | 'connecting'
@@ -90,6 +91,7 @@ export function useRoomRealtime(
   const activityRef = useRef<RoomActivity>('idle')
   const requestActivityTrackRef = useRef<(() => void) | null>(null)
   const stateRefreshAbortRef = useRef<AbortController | null>(null)
+  const latestCaptureSignalRef = useRef<string | null>(null)
 
   const refreshRoomState = useCallback(async () => {
     stateRefreshAbortRef.current?.abort()
@@ -211,17 +213,39 @@ export function useRoomRealtime(
       .on(
         'broadcast',
         { event: 'capture_state_changed' },
-        (message: { payload?: { sessionId?: unknown; revision?: unknown } }) => {
-          const { sessionId, revision } = message.payload ?? {}
+        (message: {
+          payload?: {
+            sessionId?: unknown
+            revision?: unknown
+            sourcePosition?: unknown
+            attemptId?: unknown
+          }
+        }) => {
+          const { sessionId, revision, sourcePosition, attemptId } =
+            message.payload ?? {}
+          const ownPosition = participant.key === 'participant-1' ? 'A' : 'B'
+          const signalKey = `${sessionId}:${revision}:${sourcePosition}:${attemptId}`
           if (
             isCurrentSubscription &&
-            typeof sessionId === 'string' &&
+            isUuid(sessionId) &&
             typeof revision === 'number' &&
             Number.isSafeInteger(revision) &&
-            revision > 0
+            revision > 0 &&
+            (sourcePosition === 'A' || sourcePosition === 'B') &&
+            sourcePosition !== ownPosition &&
+            (attemptId === null || isUuid(attemptId)) &&
+            signalKey !== latestCaptureSignalRef.current
           ) {
+            latestCaptureSignalRef.current = signalKey
+            console.info('[Capture Performance]', {
+              attemptId,
+              event: 'realtime_invalidation_received',
+              revision,
+              receivedAtPerformanceMs: Math.round(performance.now() * 100) / 100,
+            })
             // Opaque wake-up only. Protected state remains authoritative and
-            // duplicate delivery is harmless because clients re-fetch it.
+            // duplicate/out-of-order delivery and the sender's own echo are
+            // ignored. A recovery poll still covers a lost mutation response.
             setCaptureSignalVersion((current) => current + 1)
           }
         }

@@ -167,6 +167,7 @@ export async function POST(request: Request, context: RouteContext) {
 
 /** Verify actual private object bytes and atomically advance the paired attempt. */
 export async function PATCH(request: Request, context: RouteContext) {
+  const requestStartedAt = new Date().toISOString()
   const { code } = await context.params
   const parsedRequest = await readJson(request)
   if (parsedRequest.error) return parsedRequest.error
@@ -207,7 +208,16 @@ export async function PATCH(request: Request, context: RouteContext) {
   }
 
   const supabase = createAdminClient()
+  let verificationMs = 0
+  let databaseTransactionMs = 0
+  let verificationStartedAt: string | null = null
+  let verificationCompletedAt: string | null = null
+  let databaseStartedAt: string | null = null
+  let databaseCompletedAt: string | null = null
+  let completionResult: string | null = null
   if (image.upload_status !== 'verified') {
+    verificationStartedAt = new Date().toISOString()
+    const verificationStarted = performance.now()
     const { data: blob, error: downloadError } = await supabase.storage
       .from(SHARED_PHOTO_BUCKET)
       .download(image.storage_path)
@@ -220,6 +230,8 @@ export async function PATCH(request: Request, context: RouteContext) {
 
     const bytes = new Uint8Array(await blob.arrayBuffer())
     const dimensions = readJpegDimensions(bytes)
+    verificationMs = performance.now() - verificationStarted
+    verificationCompletedAt = new Date().toISOString()
     if (
       !dimensions ||
       bytes.byteLength <= 0 ||
@@ -246,11 +258,15 @@ export async function PATCH(request: Request, context: RouteContext) {
       monotonicLatenessMs: boundedNumber(timing.monotonicLatenessMs, 300_000),
       clockOffsetMs: boundedNumber(timing.clockOffsetMs, 86_400_000),
       clockRoundTripMs: boundedNumber(timing.clockRoundTripMs, 60_000),
+      captureDurationMs: boundedNumber(timing.captureDurationMs, 60_000),
+      jpegEncodingMs: boundedNumber(timing.jpegEncodingMs, 60_000),
       recovery: timing.recovery === true,
       verifiedFromStoredBytes: true,
     }
 
-    const { error: completeError } = await supabase.rpc(
+    databaseStartedAt = new Date().toISOString()
+    const databaseStarted = performance.now()
+    const { data: completedState, error: completeError } = await supabase.rpc(
       'complete_synchronized_capture_upload',
       {
         p_room_code: code,
@@ -265,6 +281,9 @@ export async function PATCH(request: Request, context: RouteContext) {
         p_capture_metadata: metadata,
       }
     )
+    databaseTransactionMs = performance.now() - databaseStarted
+    databaseCompletedAt = new Date().toISOString()
+    completionResult = typeof completedState === 'string' ? completedState : null
     if (completeError) {
       console.error('[Synchronized Capture] Completion failed:', completeError)
       return jsonNoStore(
@@ -274,6 +293,7 @@ export async function PATCH(request: Request, context: RouteContext) {
     }
   }
 
+  const stateLoadStarted = performance.now()
   const capture = await loadSynchronizedCaptureState({
     roomCode: code,
     capability: authorization.capability,
@@ -282,6 +302,47 @@ export async function PATCH(request: Request, context: RouteContext) {
   if (!capture) {
     return jsonNoStore({ error: 'Capture state could not be loaded' }, { status: 503 })
   }
+  const stateLoadMs = performance.now() - stateLoadStarted
+
+  const uploadCompletedAtValue =
+    details.timing && typeof details.timing === 'object'
+      ? (details.timing as Record<string, unknown>).uploadCompletedAt
+      : null
+  const uploadCompletedAt =
+    typeof uploadCompletedAtValue === 'string'
+      ? Date.parse(uploadCompletedAtValue)
+      : Number.NaN
+  const nextAttempt =
+    capture.currentAttempt?.attemptId !== base.attemptId
+      ? capture.currentAttempt
+      : null
+  const secondUploadToNextScheduleMs =
+    completionResult === 'complete' &&
+    nextAttempt &&
+    Number.isFinite(uploadCompletedAt) &&
+    Math.abs(uploadCompletedAt - Date.now()) <= 5 * 60 * 1000
+      ? Math.max(0, Date.parse(nextAttempt.createdAt) - uploadCompletedAt)
+      : null
+
+  const serverPerformance = {
+    requestStartedAt,
+    verificationStartedAt,
+    verificationCompletedAt,
+    databaseStartedAt,
+    databaseCompletedAt,
+    responsePreparedAt: new Date().toISOString(),
+    verificationMs: Math.round(verificationMs * 100) / 100,
+    databaseTransactionMs: Math.round(databaseTransactionMs * 100) / 100,
+    stateLoadMs: Math.round(stateLoadMs * 100) / 100,
+    secondUploadToNextScheduleMs,
+  }
+  console.info('[Capture Performance]', {
+    attemptId: base.attemptId,
+    event: 'server_verification',
+    ...serverPerformance,
+    completionResult,
+    nextAttemptId: nextAttempt?.attemptId ?? null,
+  })
 
   try {
     await broadcastCaptureState(code, capture)
@@ -289,5 +350,17 @@ export async function PATCH(request: Request, context: RouteContext) {
     console.error('[Synchronized Capture] Invalidation broadcast failed:', broadcastError)
   }
 
-  return jsonNoStore({ status: 'verified', capture })
+  return NextResponse.json(
+    { status: 'verified', capture, performance: serverPerformance },
+    {
+      headers: {
+        ...noStoreHeaders,
+        'Server-Timing': [
+          `image-verify;dur=${verificationMs.toFixed(2)}`,
+          `capture-db;dur=${databaseTransactionMs.toFixed(2)}`,
+          `capture-state;dur=${stateLoadMs.toFixed(2)}`,
+        ].join(', '),
+      },
+    }
+  )
 }

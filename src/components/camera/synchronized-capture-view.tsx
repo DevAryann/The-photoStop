@@ -5,7 +5,10 @@ import { DualCameraStage } from '@/components/camera/dual-camera-stage'
 import type { UseCameraReturn } from '@/hooks/use-camera'
 import type { UseRoomWebRtcReturn } from '@/hooks/use-room-webrtc'
 import {
+  CAPTURE_COUNTDOWN_MS,
+  CAPTURE_JPEG_QUALITY,
   estimateServerClock,
+  getCaptureImageDimensions,
   getMonotonicCaptureDeadline,
   isSynchronizedCaptureState,
   shouldScheduleAttempt,
@@ -38,11 +41,23 @@ interface PendingCapture {
     clockOffsetMs: number
     clockRoundTripMs: number
     recovery: boolean
+    captureDurationMs: number
+    jpegEncodingMs: number
+    uploadCompletedAt?: string
   }
 }
 
-const POLL_INTERVAL_MS = 2_500
+const ACTIVE_RECOVERY_POLL_INTERVAL_MS = 2_000
+const IDLE_RECOVERY_POLL_INTERVAL_MS = 10_000
 const MAX_SAFE_LATE_CAPTURE_MS = 1_500
+
+function logCapturePerformance(
+  attemptId: string,
+  event: string,
+  measurements: Record<string, string | number | boolean | null | undefined>
+) {
+  console.info('[Capture Performance]', { attemptId, event, ...measurements })
+}
 
 function responseMessage(body: unknown, fallback: string) {
   return body &&
@@ -77,7 +92,7 @@ function getUiState(
   if (state.currentAttempt.resultState === 'complete') return 'moment_completed'
 
   const remaining = Date.parse(state.currentAttempt.scheduledAt) - state.serverTimeMs
-  if (remaining > 3_000) return 'scheduled'
+  if (remaining > CAPTURE_COUNTDOWN_MS) return 'scheduled'
   if (remaining > 0) return 'countdown'
   return 'capturing'
 }
@@ -108,6 +123,10 @@ export function SynchronizedCaptureView({
   const handledAttemptRef = useRef<string | null>(null)
   const pendingCapturesRef = useRef(new Map<string, PendingCapture>())
   const scheduleCancelRef = useRef<(() => void) | null>(null)
+  const refreshPromiseRef = useRef<Promise<SynchronizedCaptureState> | null>(null)
+  const stateSourceRef = useRef('initial')
+  const receivedAttemptIdsRef = useRef(new Set<string>())
+  const countdownStartedAttemptIdsRef = useRef(new Set<string>())
 
   const localPosition = captureState?.participantPosition ?? webrtc.participantPosition
   const bothCamerasConnected =
@@ -148,20 +167,36 @@ export function SynchronizedCaptureView({
     return estimate
   }, [roomCode])
 
-  const refreshState = useCallback(async () => {
-    const response = await fetch(
-      `/api/rooms/${encodeURIComponent(roomCode)}/capture-session`,
-      { cache: 'no-store' }
-    )
-    const body = await response.json().catch(() => null) as
-      | { capture?: unknown; error?: string }
-      | null
-    if (!response.ok || !isSynchronizedCaptureState(body?.capture)) {
-      throw new Error(responseMessage(body, 'Capture state could not be loaded.'))
-    }
+  const refreshState = useCallback((source = 'refresh') => {
+    if (refreshPromiseRef.current) return refreshPromiseRef.current
+    const refresh = (async () => {
+      const response = await fetch(
+        `/api/rooms/${encodeURIComponent(roomCode)}/capture-session?capture=1`,
+        { cache: 'no-store' }
+      )
+      const body = await response.json().catch(() => null) as
+        | { capture?: unknown; error?: string }
+        | null
+      if (!response.ok || !isSynchronizedCaptureState(body?.capture)) {
+        throw new Error(responseMessage(body, 'Capture state could not be loaded.'))
+      }
 
-    if (mountedRef.current) setCaptureState(body.capture)
-    return body.capture
+      if (mountedRef.current) {
+        stateSourceRef.current = source
+        setCaptureState(body.capture)
+      }
+      return body.capture
+    })()
+    refreshPromiseRef.current = refresh
+    void refresh.then(
+      () => {
+        if (refreshPromiseRef.current === refresh) refreshPromiseRef.current = null
+      },
+      () => {
+        if (refreshPromiseRef.current === refresh) refreshPromiseRef.current = null
+      }
+    )
+    return refresh
   }, [roomCode])
 
   const mutateCapture = useCallback(async (
@@ -187,6 +222,7 @@ export function SynchronizedCaptureView({
     if (!response.ok || !isSynchronizedCaptureState(body?.capture)) {
       throw new Error(responseMessage(body, 'Capture state could not be updated.'))
     }
+    stateSourceRef.current = `mutation:${action}`
     setCaptureState(body.capture)
   }, [roomCode, webrtc.clientLease])
 
@@ -198,12 +234,14 @@ export function SynchronizedCaptureView({
     if (!lease) throw new Error('This tab lost the camera session. Reconnect to retry.')
     setIsUploading(true)
     setError(null)
+    const pipelineStartedAt = performance.now()
     try {
       const base = {
         attemptId: attempt.attemptId,
         clientId: lease.clientId,
         generation: lease.generation,
       }
+      const reserveStartedAt = performance.now()
       const reserveResponse = await fetch(
         `/api/rooms/${encodeURIComponent(roomCode)}/capture-session/image`,
         {
@@ -226,7 +264,9 @@ export function SynchronizedCaptureView({
       if (!reserveResponse.ok) {
         throw new Error(responseMessage(reservation, 'Photo upload could not start.'))
       }
+      const reservationMs = performance.now() - reserveStartedAt
 
+      let storageUploadMs = 0
       if (reservation?.status === 'upload') {
         if (
           typeof reservation.upload?.path !== 'string' ||
@@ -234,6 +274,7 @@ export function SynchronizedCaptureView({
         ) {
           throw new Error('Photo upload could not start.')
         }
+        const storageUploadStartedAt = performance.now()
         const { error: uploadError } = await createClient().storage
           .from(SHARED_PHOTO_BUCKET)
           .uploadToSignedUrl(
@@ -247,8 +288,13 @@ export function SynchronizedCaptureView({
         if (uploadError && !uploadError.message.toLowerCase().includes('exist')) {
           throw uploadError
         }
+        storageUploadMs = performance.now() - storageUploadStartedAt
       }
 
+      pending.timing.uploadCompletedAt = clock
+        ? new Date(Date.now() + clock.offsetMs).toISOString()
+        : new Date().toISOString()
+      const verificationStartedAt = performance.now()
       const verifyResponse = await fetch(
         `/api/rooms/${encodeURIComponent(roomCode)}/capture-session/image`,
         {
@@ -262,18 +308,52 @@ export function SynchronizedCaptureView({
         }
       )
       const verified = await verifyResponse.json().catch(() => null) as
-        | { capture?: unknown; error?: string }
+        | {
+            capture?: unknown
+            error?: string
+            performance?: {
+              verificationMs?: unknown
+              databaseTransactionMs?: unknown
+              stateLoadMs?: unknown
+              secondUploadToNextScheduleMs?: unknown
+            }
+          }
         | null
+      const verificationRoundTripMs = performance.now() - verificationStartedAt
       if (!verifyResponse.ok) {
         throw new Error(responseMessage(verified, 'Photo verification failed.'))
       }
       pendingCapturesRef.current.delete(attempt.attemptId)
       setHasPendingCapture(pendingCapturesRef.current.size > 0)
       if (isSynchronizedCaptureState(verified?.capture)) {
+        stateSourceRef.current = 'verification-response'
         setCaptureState(verified.capture)
       } else {
-        await refreshState()
+        await refreshState('verification-fallback')
       }
+      logCapturePerformance(attempt.attemptId, 'upload_verified', {
+        participantPosition: localPosition,
+        reservationMs: Math.round(reservationMs * 100) / 100,
+        storageUploadMs: Math.round(storageUploadMs * 100) / 100,
+        verificationRoundTripMs: Math.round(verificationRoundTripMs * 100) / 100,
+        totalPipelineMs: Math.round((performance.now() - pipelineStartedAt) * 100) / 100,
+        serverVerificationMs:
+          typeof verified?.performance?.verificationMs === 'number'
+            ? verified.performance.verificationMs
+            : null,
+        databaseTransactionMs:
+          typeof verified?.performance?.databaseTransactionMs === 'number'
+            ? verified.performance.databaseTransactionMs
+            : null,
+        serverStateLoadMs:
+          typeof verified?.performance?.stateLoadMs === 'number'
+            ? verified.performance.stateLoadMs
+            : null,
+        secondUploadToNextScheduleMs:
+          typeof verified?.performance?.secondUploadToNextScheduleMs === 'number'
+            ? verified.performance.secondUploadToNextScheduleMs
+            : null,
+      })
     } catch (caughtError) {
       setError(
         caughtError instanceof Error
@@ -284,7 +364,7 @@ export function SynchronizedCaptureView({
     } finally {
       if (mountedRef.current) setIsUploading(false)
     }
-  }, [refreshState, roomCode, webrtc.clientLease])
+  }, [clock, localPosition, refreshState, roomCode, webrtc.clientLease])
 
   const captureAtDeadline = useCallback(async (
     attempt: CaptureAttemptState,
@@ -308,23 +388,29 @@ export function SynchronizedCaptureView({
 
     const actualPerformanceNow = performance.now()
     const estimatedServerCaptureMs = Date.now() + clock.offsetMs
-    canvas.width = video.videoWidth
-    canvas.height = video.videoHeight
+    const dimensions = getCaptureImageDimensions(video.videoWidth, video.videoHeight)
+    if (!dimensions) throw new Error('The camera reported an invalid photo size.')
+    const captureStartedAt = performance.now()
+    canvas.width = dimensions.width
+    canvas.height = dimensions.height
     const context = canvas.getContext('2d')
     if (!context) throw new Error('Photo capture is unavailable in this browser.')
     context.drawImage(video, 0, 0, canvas.width, canvas.height)
+    const captureDurationMs = performance.now() - captureStartedAt
     setFlash(true)
     window.setTimeout(() => mountedRef.current && setFlash(false), 260)
 
+    const encodingStartedAt = performance.now()
     const blob = await new Promise<Blob>((resolve, reject) => {
       canvas.toBlob(
         (result) => result
           ? resolve(result)
           : reject(new Error('The camera could not create a JPEG photo.')),
         'image/jpeg',
-        0.92
+        CAPTURE_JPEG_QUALITY
       )
     })
+    const jpegEncodingMs = performance.now() - encodingStartedAt
     const scheduledMs = Date.parse(attempt.scheduledAt)
     const pending: PendingCapture = {
       blob,
@@ -335,12 +421,24 @@ export function SynchronizedCaptureView({
         clockOffsetMs: clock.offsetMs,
         clockRoundTripMs: clock.roundTripMs,
         recovery,
+        captureDurationMs,
+        jpegEncodingMs,
       },
     }
+    logCapturePerformance(attempt.attemptId, 'captured_and_encoded', {
+      participantPosition: localPosition,
+      captureDurationMs: Math.round(captureDurationMs * 100) / 100,
+      jpegEncodingMs: Math.round(jpegEncodingMs * 100) / 100,
+      outputWidth: dimensions.width,
+      outputHeight: dimensions.height,
+      jpegSizeBytes: blob.size,
+      scheduledLatenessMs: Math.round((actualPerformanceNow - deadline) * 100) / 100,
+      recovery,
+    })
     pendingCapturesRef.current.set(attempt.attemptId, pending)
     setHasPendingCapture(true)
     await uploadCapture(attempt, pending)
-  }, [camera.streamRef, camera.videoRef, clock, uploadCapture])
+  }, [camera.streamRef, camera.videoRef, clock, localPosition, uploadCapture])
 
   useEffect(() => {
     const attempt = captureState?.currentAttempt
@@ -386,10 +484,32 @@ export function SynchronizedCaptureView({
     let timer: ReturnType<typeof setTimeout> | null = null
     let frame = 0
     let cancelled = false
+    const previousCompletedAt = [...captureState.moments]
+      .reverse()
+      .find((moment) => moment.status === 'complete')?.attempt?.completedAt
     const tick = () => {
       if (cancelled) return
       const remaining = deadline - performance.now()
-      setCountdown(remaining > 0 ? Math.max(1, Math.ceil(remaining / 1000)) : null)
+      const nextCountdown =
+        remaining > 0 && remaining <= CAPTURE_COUNTDOWN_MS
+          ? Math.max(1, Math.ceil(remaining / 1000))
+          : null
+      setCountdown(nextCountdown)
+      if (
+        nextCountdown !== null &&
+        !countdownStartedAttemptIdsRef.current.has(attempt.attemptId)
+      ) {
+        countdownStartedAttemptIdsRef.current.add(attempt.attemptId)
+        const estimatedServerNow = Date.now() + clock.offsetMs
+        logCapturePerformance(attempt.attemptId, 'countdown_started', {
+          scheduleToCountdownMs:
+            Math.round((estimatedServerNow - Date.parse(attempt.createdAt)) * 100) / 100,
+          previousMomentCompleteToCountdownMs: previousCompletedAt
+            ? Math.round((estimatedServerNow - Date.parse(previousCompletedAt)) * 100) / 100
+            : null,
+          clockRoundTripMs: Math.round(clock.roundTripMs * 100) / 100,
+        })
+      }
       if (remaining <= 0) {
         scheduleCancelRef.current = null
         void captureAtDeadline(attempt, deadline).catch((captureError: unknown) => {
@@ -415,6 +535,24 @@ export function SynchronizedCaptureView({
   }, [camera.status, captureAtDeadline, captureState, clock, localPosition])
 
   useEffect(() => {
+    const attempt = captureState?.currentAttempt
+    if (!attempt || !clock || receivedAttemptIdsRef.current.has(attempt.attemptId)) return
+    receivedAttemptIdsRef.current.add(attempt.attemptId)
+    logCapturePerformance(attempt.attemptId, 'attempt_received', {
+      source: stateSourceRef.current,
+      scheduleToClientStateMs:
+        Math.round(
+          (Date.now() + clock.offsetMs - Date.parse(attempt.createdAt)) * 100
+        ) / 100,
+      timeUntilCaptureMs:
+        Math.round(
+          (Date.parse(attempt.scheduledAt) - (Date.now() + clock.offsetMs)) * 100
+        ) / 100,
+      clockRoundTripMs: Math.round(clock.roundTripMs * 100) / 100,
+    })
+  }, [captureState?.currentAttempt, clock])
+
+  useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
@@ -427,11 +565,18 @@ export function SynchronizedCaptureView({
     let active = true
     const synchronize = async () => {
       try {
-        for (let index = 0; index < 5 && active; index += 1) {
+        await Promise.all([
+          clockSamplesRef.current.length === 0 ? sampleClock() : Promise.resolve(),
+          refreshState('initial-sync'),
+        ])
+        if (active) setError(null)
+        for (
+          let index = clockSamplesRef.current.length;
+          index < 3 && active;
+          index += 1
+        ) {
           await sampleClock()
         }
-        await refreshState()
-        if (active) setError(null)
       } catch (syncError) {
         if (active) {
           setError(syncError instanceof Error ? syncError.message : 'Clock synchronization failed.')
@@ -444,17 +589,26 @@ export function SynchronizedCaptureView({
 
   useEffect(() => {
     if (!webrtc.clientLease) return
-    void refreshState().catch(() => undefined)
+    void refreshState('realtime-or-subscription').catch(() => undefined)
   }, [captureSignalVersion, refreshState, subscriptionVersion, webrtc.clientLease])
 
   useEffect(() => {
     if (!webrtc.clientLease) return
+    const needsFastRecoveryPoll =
+      uiState === 'waiting_partner_upload' ||
+      (uiState === 'waiting_readiness' &&
+        Boolean(captureState?.members.some((member) => member.ready)))
     const refreshIfVisible = () => {
       if (document.visibilityState === 'visible') {
-        void refreshState().catch(() => undefined)
+        void refreshState('recovery-poll').catch(() => undefined)
       }
     }
-    const interval = window.setInterval(refreshIfVisible, POLL_INTERVAL_MS)
+    const interval = window.setInterval(
+      refreshIfVisible,
+      needsFastRecoveryPoll
+        ? ACTIVE_RECOVERY_POLL_INTERVAL_MS
+        : IDLE_RECOVERY_POLL_INTERVAL_MS
+    )
     const clockInterval = window.setInterval(() => {
       if (document.visibilityState === 'visible') {
         void sampleClock().catch(() => undefined)
@@ -470,7 +624,7 @@ export function SynchronizedCaptureView({
       window.removeEventListener('online', refreshIfVisible)
       document.removeEventListener('visibilitychange', refreshIfVisible)
     }
-  }, [refreshState, sampleClock, webrtc.clientLease])
+  }, [captureState?.members, refreshState, sampleClock, uiState, webrtc.clientLease])
 
   useEffect(() => {
     onCaptureActivityChange?.(

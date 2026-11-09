@@ -51,7 +51,7 @@ export async function loadSynchronizedCaptureState({
         .order('capture_index', { ascending: true }),
       supabase
         .from('capture_attempts')
-        .select('id, opaque_id, moment_id, attempt_number, scheduled_capture_at, result_state')
+        .select('id, opaque_id, moment_id, attempt_number, scheduled_capture_at, result_state, created_at, updated_at')
         .eq('session_id', session.id)
         .order('attempt_number', { ascending: false }),
     ])
@@ -106,9 +106,23 @@ export async function loadSynchronizedCaptureState({
   )
 
   const previewUrls = new Map<string, string>()
+  const momentIndexById = new Map(
+    moments.map((moment) => [moment.id, moment.capture_index])
+  )
+  const latestCompleteAttempt = attempts
+    .filter((attempt) => attempt.result_state === 'complete')
+    .sort(
+      (left, right) =>
+        (momentIndexById.get(right.moment_id) ?? 0) -
+        (momentIndexById.get(left.moment_id) ?? 0)
+    )[0]
   await Promise.all(
     (images ?? [])
-      .filter((image) => image.upload_status === 'verified')
+      .filter(
+        (image) =>
+          image.upload_status === 'verified' &&
+          image.attempt_id === latestCompleteAttempt?.id
+      )
       .map(async (image) => {
         const { data, error } = await supabase.storage
           .from(SHARED_PHOTO_BUCKET)
@@ -168,10 +182,13 @@ export async function loadSynchronizedCaptureState({
     return {
       attemptId: attempt.opaque_id,
       attemptNumber: attempt.attempt_number,
+      createdAt: attempt.created_at,
       scheduledAt:
         typeof ownImage?.retry_scheduled_at === 'string'
           ? ownImage.retry_scheduled_at
           : attempt.scheduled_capture_at,
+      completedAt:
+        attempt.result_state === 'complete' ? attempt.updated_at : null,
       resultState: attempt.result_state as CaptureAttemptState['resultState'],
       photos,
     }
@@ -238,7 +255,10 @@ export async function loadSynchronizedCaptureState({
 
 export async function broadcastCaptureState(
   roomCode: string,
-  state: Pick<SynchronizedCaptureState, 'sessionId' | 'revision'>
+  state: Pick<
+    SynchronizedCaptureState,
+    'sessionId' | 'revision' | 'participantPosition' | 'currentAttempt'
+  >
 ) {
   const supabase = createAdminClient()
   const channel = supabase.channel(`room:${roomCode}`)
@@ -246,7 +266,12 @@ export async function broadcastCaptureState(
     await channel.send({
       type: 'broadcast',
       event: 'capture_state_changed',
-      payload: { sessionId: state.sessionId, revision: state.revision },
+      payload: {
+        sessionId: state.sessionId,
+        revision: state.revision,
+        sourcePosition: state.participantPosition,
+        attemptId: state.currentAttempt?.attemptId ?? null,
+      },
     })
   } finally {
     await supabase.removeChannel(channel)

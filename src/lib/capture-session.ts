@@ -1,4 +1,9 @@
 export const CAPTURE_MOMENT_COUNT = 6
+export const CAPTURE_COUNTDOWN_MS = 3_000
+export const CAPTURE_MIN_DELIVERY_BUFFER_MS = 1_000
+export const CAPTURE_MAX_SCHEDULE_LEAD_MS = 5_000
+export const CAPTURE_IMAGE_MAX_DIMENSION = 1_600
+export const CAPTURE_JPEG_QUALITY = 0.86
 
 export const CAPTURE_SESSION_PHASES = [
   'camera_setup',
@@ -52,7 +57,9 @@ export interface CapturePhotoState {
 export interface CaptureAttemptState {
   attemptId: string
   attemptNumber: number
+  createdAt: string
   scheduledAt: string
+  completedAt: string | null
   resultState: 'pending' | 'partial' | 'complete'
   photos: CapturePhotoState[]
 }
@@ -86,6 +93,33 @@ export interface ServerClockEstimate {
   offsetMs: number
   roundTripMs: number
   sampledAtClientWallMs: number
+}
+
+/**
+ * Keep the visible countdown at three seconds while reserving enough delivery
+ * time for an authoritative state refresh. The database uses the same bounds.
+ */
+export function getCaptureScheduleLeadMs(clockRoundTripMs: number | null) {
+  const measuredBuffer =
+    typeof clockRoundTripMs === 'number' && Number.isFinite(clockRoundTripMs)
+      ? Math.max(CAPTURE_MIN_DELIVERY_BUFFER_MS, clockRoundTripMs * 2)
+      : CAPTURE_MIN_DELIVERY_BUFFER_MS
+  return Math.min(
+    CAPTURE_MAX_SCHEDULE_LEAD_MS,
+    CAPTURE_COUNTDOWN_MS + measuredBuffer
+  )
+}
+
+/** Bound upload work without changing the camera stream or output aspect ratio. */
+export function getCaptureImageDimensions(width: number, height: number) {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return null
+  }
+  const scale = Math.min(1, CAPTURE_IMAGE_MAX_DIMENSION / Math.max(width, height))
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  }
 }
 
 /**

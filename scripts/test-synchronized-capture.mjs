@@ -34,6 +34,10 @@ const migration007 = readFileSync(
   fileURLToPath(new URL('../supabase/migrations/007_synchronized_capture_v1.sql', import.meta.url)),
   'utf8'
 )
+const migration008 = readFileSync(
+  fileURLToPath(new URL('../supabase/migrations/008_capture_pipeline_performance.sql', import.meta.url)),
+  'utf8'
+)
 const stateServer = readFileSync(
   fileURLToPath(new URL('../src/lib/capture-session-server.ts', import.meta.url)),
   'utf8'
@@ -77,6 +81,22 @@ check('duplicate attempt delivery schedules capture only once', () => {
   assert.equal(capture.shouldScheduleAttempt(null, attempt, 'verified'), false)
 })
 
+check('capture output and schedule lead are bounded for production', () => {
+  assert.deepEqual(
+    { ...capture.getCaptureImageDimensions(1920, 1080) },
+    { width: 1600, height: 900 }
+  )
+  assert.deepEqual(
+    { ...capture.getCaptureImageDimensions(720, 1280) },
+    { width: 720, height: 1280 }
+  )
+  assert.equal(capture.getCaptureImageDimensions(0, 1080), null)
+  assert.equal(capture.getCaptureScheduleLeadMs(null), 4000)
+  assert.equal(capture.getCaptureScheduleLeadMs(120), 4000)
+  assert.equal(capture.getCaptureScheduleLeadMs(800), 4600)
+  assert.equal(capture.getCaptureScheduleLeadMs(5000), 5000)
+})
+
 check('JPEG dimensions are derived from actual bytes', () => {
   const bytes = Uint8Array.from([
     0xff, 0xd8,
@@ -107,6 +127,15 @@ check('both readiness and live generation leases gate one scheduled attempt', ()
   assert.match(migration007, /active_client_generation != p_generation/)
 })
 
+check('next-attempt lead adapts to measured RTT without weakening gates', () => {
+  assert.match(migration008, /get_synchronized_capture_schedule_lead/)
+  assert.match(migration008, /jsonb_typeof\(image\.capture_metadata -> 'clockRoundTripMs'\) = 'number'/)
+  assert.match(migration008, /GREATEST\([\s\S]*1000[\s\S]*LEAST\(2000/)
+  assert.match(migration008, /p_now \+ get_synchronized_capture_schedule_lead\(p_session_id\)/)
+  assert.match(migration008, /result_state IN \('pending', 'partial'\)/)
+  assert.match(migration008, /idx_capture_attempts_one_open_per_moment|schedule_next_synchronized_capture/)
+})
+
 check('paired verification advances only after both images and all six moments', () => {
   assert.match(migration007, /IF v_verified_count = 2 THEN/)
   assert.match(migration007, /SET armed_state = 'released', result_state = 'complete'/)
@@ -132,6 +161,8 @@ check('upload authorization is participant-derived and idempotent', () => {
   assert.match(imageRoute, /image\.upload_status === 'verified'/)
   assert.match(imageRoute, /upsert: false/)
   assert.match(imageRoute, /readJpegDimensions/)
+  assert.match(imageRoute, /Server-Timing/)
+  assert.match(imageRoute, /databaseTransactionMs/)
 })
 
 check('refresh state exposes only positions and opaque attempt IDs', () => {
@@ -139,6 +170,16 @@ check('refresh state exposes only positions and opaque attempt IDs', () => {
   assert.match(stateServer, /position: member\.position/)
   assert.doesNotMatch(stateServer, /participantId:/)
   assert.doesNotMatch(stateServer, /storagePath:/)
+  assert.match(stateServer, /image\.attempt_id === latestCompleteAttempt\?\.id/)
+})
+
+check('client records each pipeline stage without logging image data', () => {
+  assert.match(captureClient, /performance\.now\(\)/)
+  assert.match(captureClient, /captured_and_encoded/)
+  assert.match(captureClient, /upload_verified/)
+  assert.match(captureClient, /attempt_received/)
+  assert.match(captureClient, /countdown_started/)
+  assert.doesNotMatch(captureClient, /console\.(?:info|log)\([^\n]*blob/i)
 })
 
 check('capabilities and browser-role isolation remain mandatory', () => {
